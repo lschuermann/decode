@@ -1,0 +1,82 @@
+openapi: 3.0.3
+
+info:
+  title: DECODE Node Server API
+  version: 0.1.0
+
+paths:
+  /shard/:
+    get:
+      summary: Enumerate shards stored on this node
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of shards
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ShardInfo"
+
+    post:
+      summary: Upload a shard
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Shard uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShardInfo"
+
+  /shard/{shardDigest}:
+    get:
+      summary: Retrieve a shard
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: shardDigest
+          in: path
+          required: true
+          description: Hex-encoded SHA3-256 digest of shard
+          schema:
+            type: string
+            length: 64
+      responses:
+        '200':
+          description: Download shard data
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+components:
+  schemas:
+    ShardInfo:
+      type: object
+      required:
+        - sha3_256
+        - size
+      properties:
+        sha3_256:
+          type: string
+          description: Hex-encoded SHA3-256 digest of shard data
+        size:
+          type: integer
+          format: int64
+          description: "Size of the shard in bytes"
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
