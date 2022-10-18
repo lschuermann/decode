@@ -50,7 +50,6 @@ paths:
           description: Hex-encoded SHA3-256 digest of shard
           schema:
             type: string
-            length: 64
       responses:
         '200':
           description: Download shard data
