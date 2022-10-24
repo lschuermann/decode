@@ -1,0 +1,196 @@
+openapi: 3.0.3
+
+info:
+  title: DECODE Coordinator Server API
+  version: 0.1.0
+
+paths:
+
+  /object/{objectId}:
+    get:
+      summary: Retrieve an object
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: objectId
+          in: path
+          required: true
+          description: UUID of object
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Object retrieval map
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectRetrievalMap"
+          
+  /object:
+    put:
+      summary: Upload an object
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - object_size
+              properties:
+                object_size:
+                  type: integer
+                  format: int64
+                  description: Size of the object in bytes
+      responses:
+        '200':
+          description: Object insertion map
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectUploadMap"
+  /object/{objectId}/finalize:
+    post:
+      summary: Finalize upload of object
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: objectId
+          in: path
+          required: true
+          description: UUID of object
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - receipts
+                - object_upload_map
+              properties:
+                receipts:
+                  type: array
+                  items:
+                    type: string
+                    description: Node upload receipts
+                object_upload_map:
+                  $ref: "#/components/schemas/ObjectUploadMap"
+      responses:
+        '200':
+          description: Object uploaded
+
+components:
+  schemas:
+    ObjectRetrievalMap:
+      type: object
+      required:
+        - object_size
+        - chunk_size
+        - shard_size
+        - code_ratio_data
+        - code_ratio_parity
+        - shard_map
+        - node_map
+      properties:
+        object_size:
+          type: integer
+          format: int64
+          description: Size of the object in bytes
+        chunk_size:
+          type: integer
+          format: int64
+          description: Size of each chunk in bytes
+        shard_size:
+          type: integer
+          format: int64
+          description: Size of each shard in bytes
+        code_ratio_data:
+          type: integer
+          description: Number of data shards per chunk
+        code_ratio_parity:
+          type: integer
+          description: Number of parity shards per chunk
+        shard_map:
+          type: array
+          items:
+            type: array
+            items:
+              type: object
+              required:
+                - digest
+                - nodes
+              properties:
+                digest:
+                  type: string
+                  description: Sha3-256 digest of shard
+                nodes:
+                  type: array
+                  items:
+                    type: integer
+                    description: NodeMap index
+        node_map:
+          type: array
+          items:
+            type: string
+            description: Base URL of node
+    ObjectUploadMap:
+      type: object
+      required:
+        - object_size
+        - chunk_size
+        - shard_size
+        - code_ratio_data
+        - code_ratio_parity
+        - shard_map
+        - object_id
+        - signature
+      properties:
+        object_size:
+          type: integer
+          format: int64
+          description: Size of the object in bytes
+        chunk_size:
+          type: integer
+          format: int64
+          description: Size of each chunk in bytes
+        shard_size:
+          type: integer
+          format: int64
+          description: Size of each shard in bytes
+        code_ratio_data:
+          type: integer
+          description: Number of data shards per chunk
+        code_ratio_parity:
+          type: integer
+          description: Number of parity shards per chunk
+        shard_map:
+          type: array
+          items:
+            type: array
+            items:
+              type: object
+              required:
+                - ticket
+                - nodes
+              properties:
+                ticket:
+                  type: string
+                  description: Authorization ticket for node storing shards
+                node:
+                  type: string
+                  description: Base URL of node
+        object_id:
+          type: string
+          description: UUID of object
+        signature:
+          type: string
+          description: Opaque Signature of request
+        
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
