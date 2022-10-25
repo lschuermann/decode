@@ -26,9 +26,9 @@ mod shard_store;
 /// Parsed and validated node server configuration, along with other
 /// shared state and instances:
 struct NodeServerState {
-    node_id: Uuid,
-    public_url: Url,
-    coordinator_url: Url,
+    _node_id: Uuid,
+    _public_url: Url,
+    _coordinator_url: Url,
     shards_path: PathBuf,
     digest_path_gen: shard_store::DigestPathGenerator<32>,
     max_shard_size: ByteUnit,
@@ -157,18 +157,18 @@ fn initial_server_state(
     parsed_config: config::NodeServerConfigInterface,
 ) -> Result<NodeServerState, String> {
     Ok(NodeServerState {
-        node_id: parsed_config
+        _node_id: parsed_config
             .node_id
             .ok_or("Node needs to be assigned a unique, valid UUID.".to_string())?,
 
-        public_url: Url::parse(
+        _public_url: Url::parse(
             &parsed_config
                 .public_url
                 .ok_or("Node must be supplied its public base URL.".to_string())?,
         )
         .map_err(|err| format!("Failed to parse public base URL configuration: {:?}", err))?,
 
-        coordinator_url: Url::parse(
+        _coordinator_url: Url::parse(
             &parsed_config
                 .coordinator_url
                 .ok_or("Node must be passed the coordinator base URL.".to_string())?,
