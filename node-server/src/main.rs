@@ -1,13 +1,16 @@
 #[macro_use]
 extern crate rocket;
 
+use std::io::ErrorKind as IOErrorKind;
 use std::path::PathBuf;
 
 use rocket::data::{ByteUnit, ToByteUnit};
 use rocket::fairing::AdHoc;
-use rocket::fs::NamedFile;
+use rocket::http::ContentType;
 use rocket::request::FromParam;
+use rocket::response::{self, Responder};
 use rocket::{Data, State};
+use rocket::{Request, Response};
 
 use figment::{
     providers::{Format, Serialized, Toml},
@@ -29,9 +32,8 @@ struct NodeServerState {
     _node_id: Uuid,
     _public_url: Url,
     _coordinator_url: Url,
-    shards_path: PathBuf,
-    digest_path_gen: shard_store::DigestPathGenerator<32>,
     max_shard_size: ByteUnit,
+    shard_store: shard_store::ShardStore<32>,
 }
 
 struct HexDigest<const N: usize> {
@@ -59,41 +61,57 @@ impl<'r, const N: usize> FromParam<'r> for HexDigest<N> {
     }
 }
 
-#[get("/shard/<shard_digest>")]
-async fn get_shard(
-    shard_digest: HexDigest<32>,
-    state: &State<NodeServerState>,
-) -> Option<NamedFile> {
-    let shard_path = state
-        .digest_path_gen
-        .get_path(&state.shards_path, shard_digest.get_digest());
+struct ShardResponse<'a, const N: usize>(shard_store::Shard<'a, N>);
+impl<'r, 'a: 'r, const N: usize> Responder<'r, 'a> for ShardResponse<'a, N> {
+    fn respond_to(self, _req: &'r Request<'_>) -> response::Result<'a> {
+        Response::build()
+            .header(ContentType::Binary)
+            .streamed_body(self.0)
+            .ok()
+    }
+}
 
-    NamedFile::open(&shard_path).await.ok()
+#[get("/shard/<shard_digest>")]
+async fn get_shard<'a>(
+    shard_digest: HexDigest<32>,
+    state: &'a State<NodeServerState>,
+) -> Result<ShardResponse<'a, 32>, error::APIError> {
+    // Try to retrieve the requested shard from the shard store:
+    let shard = state
+        .shard_store
+        .get_shard(shard_digest.get_digest())
+        .await
+        .map_err(|err| match err.kind() {
+            IOErrorKind::NotFound => error::APIError::ResourceNotFound,
+            _ => {
+                log::error!("Failed to open shard from shard store: {:?}", err);
+                error::APIError::InternalServerError
+            }
+        })?;
+
+    Ok(ShardResponse(shard))
 }
 
 #[post("/shard", data = "<data>")]
-async fn post_shard(data: Data<'_>, state: &State<NodeServerState>) -> Result<(), error::APIError> {
-    use tokio::fs::{
-        create_dir_all as async_create_dir_all, rename as async_rename_file, File as AsyncFile,
-    };
+async fn post_shard(
+    data: Data<'_>,
+    state: &State<NodeServerState>,
+) -> Result<String, error::APIError> {
     use tokio::io::AsyncWriteExt;
 
-    // 1. Create a temporary file path:
-    let tmppath = PathBuf::from("foo.txt"); // TODO: make sure that this is unique
+    let mut insertion_shard = state
+        .shard_store
+        .insert_shard_by_writer()
+        .await
+        .map_err(|err| {
+            log::error!("Failed to acquire insertion shard: {:?}", err);
+            error::APIError::InternalServerError
+        })?;
 
-    // 1. Create and open a temporary file to stream the intermediate
-    // data to:
-    let tmpfile = AsyncFile::create(&tmppath).await.map_err(|err| {
-        log::error!(
-            "Failed to write client contents to temporary file: {:?}",
-            err
-        );
-        error::APIError::InternalServerError
-    })?;
-
-    // 2. Instantiate a PipeThroughHasher to calculate a checksum for
-    // the streamed data.
-    let mut pipethroughhasher = pipe_through_hasher::PipeThroughHasher::new(tmpfile);
+    // Instantiate a PipeThroughHasher to calculate a checksum for the
+    // streamed data.
+    let mut pipethroughhasher =
+        pipe_through_hasher::PipeThroughHasher::new(insertion_shard.as_async_writer());
 
     // 3. Open the provided data payload and stream it to the hasher,
     // which will in turn forward it to the temporary file. We await
@@ -126,7 +144,13 @@ async fn post_shard(data: Data<'_>, state: &State<NodeServerState>) -> Result<()
         std::mem::drop(pipethroughhasher);
 
         // ... delete the temporary file ...
-        // TODO: delete temporary file!
+        insertion_shard.abort().await.map_err(|err| {
+            log::error!(
+                "Failed to abort inserting a chunk into the chunk store: {:?}",
+                err
+            );
+            error::APIError::InternalServerError
+        })?;
 
         // ... and report to the client accordingly:
         Err(error::APIError::ShardTooLarge {
@@ -142,18 +166,17 @@ async fn post_shard(data: Data<'_>, state: &State<NodeServerState>) -> Result<()
             error::APIError::InternalServerError
         })?;
 
-        // 6. Move the temporary file to its final destination path:
-        let shard_path = state.digest_path_gen.get_path(&state.shards_path, &digest);
-        async_create_dir_all(&shard_path.parent().unwrap())
-            .await
-            .unwrap();
-        async_rename_file(&tmppath, &shard_path).await.unwrap();
+        // Finalize the inserted shard:
+        insertion_shard.finalize(&digest).await.map_err(|err| {
+            log::error!("Failed finalizing insertion of chunk: {:?}", err);
+            error::APIError::InternalServerError
+        })?;
 
-        Ok(())
+        Ok(format!("{:x?}", &digest))
     }
 }
 
-fn initial_server_state(
+async fn initial_server_state(
     parsed_config: config::NodeServerConfigInterface,
 ) -> Result<NodeServerState, String> {
     Ok(NodeServerState {
@@ -180,16 +203,26 @@ fn initial_server_state(
             )
         })?,
 
-        shards_path: PathBuf::from(parsed_config.shards_path),
-
-        digest_path_gen: shard_store::DigestPathGenerator::new(3),
+        shard_store: shard_store::ShardStore::new(
+            PathBuf::from(&parsed_config.shards_path),
+            false,
+            3,
+        )
+        .await
+        .map_err(|err| match err {
+            Ok(lock_id) => format!(
+                "Cannot acquire lock to create ShardStore instance, locked by {}",
+                lock_id
+            ),
+            Err(ioerr) => format!("Cannot create ShardStore instance: {:?}", ioerr),
+        })?,
 
         max_shard_size: 10.gibibytes(),
     })
 }
 
 #[launch]
-fn rocket() -> _ {
+async fn rocket() -> _ {
     // TODO: change log level at runtime based on the configuration file
     fern::Dispatch::new()
         .format(|out, message, record| {
@@ -201,7 +234,7 @@ fn rocket() -> _ {
                 message
             ))
         })
-        .level(log::LevelFilter::Debug)
+        .level(log::LevelFilter::Warn)
         .chain(std::io::stdout())
         .apply()
         .unwrap();
@@ -216,7 +249,7 @@ fn rocket() -> _ {
         .extract()
         .expect("Failed to parse the node server configuration.");
 
-    let node_server_state = match initial_server_state(parsed_config) {
+    let node_server_state = match initial_server_state(parsed_config).await {
         Ok(state) => state,
         Err(errmsg) => {
             log::error!("{}", errmsg);
