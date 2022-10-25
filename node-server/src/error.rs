@@ -11,7 +11,7 @@ use decode_rs::api::node as node_api;
 pub enum APIError {
     ShardTooLarge { max_bytes: u64 },
 
-    ResourceNotFoundError,
+    ResourceNotFound,
 
     InternalServerError,
 }
@@ -40,7 +40,7 @@ impl<'r, 'o: 'r> Responder<'r, 'o> for APIError {
                 }))
             }
 
-            APIError::ResourceNotFoundError => {
+            APIError::ResourceNotFound => {
                 // Use the generic 404 responder to avoid leaking
                 // further information about the requested object.
                 Status::NotFound.respond_to(req)
