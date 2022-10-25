@@ -25,8 +25,8 @@ pub enum APIError<'desc> {
     /// The `max_bytes` field will hint at how many bytes the node is
     /// willing to accept in a single shard currently.
     ShardTooLarge {
-	max_bytes: u64,
-	description: Cow<'desc, str>,
+        max_bytes: u64,
+        description: Cow<'desc, str>,
     },
 
     /// The requested resource could not be found
@@ -56,16 +56,16 @@ impl<'desc> APIError<'desc> {
     }
 
     pub fn http_status_code(&self) -> u16 {
-	match self {
-	    // 413: Payload Too Large
-	    APIError::ShardTooLarge { .. } => 413,
+        match self {
+            // 413: Payload Too Large
+            APIError::ShardTooLarge { .. } => 413,
 
-	    // 404: Not Found
-	    APIError::ResourceNotFound { .. } => 404,
+            // 404: Not Found
+            APIError::ResourceNotFound { .. } => 404,
 
-	    // 500: Internal Server Error
-	    APIError::InternalServerError { .. } => 500,
-	}
+            // 500: Internal Server Error
+            APIError::InternalServerError { .. } => 500,
+        }
     }
 }
 
