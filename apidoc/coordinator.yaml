@@ -6,7 +6,7 @@ info:
 
 paths:
 
-  /object/{objectId}:
+  /v0/object/{objectId}:
     get:
       summary: Retrieve an object
       security:
@@ -25,8 +25,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObjectRetrievalMap"
-          
-  /object:
+
+  /v0/object:
     put:
       summary: Upload an object
       security:
@@ -50,7 +50,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ObjectUploadMap"
-  /object/{objectId}/finalize:
+  /v0/object/{objectId}/finalize:
     post:
       summary: Finalize upload of object
       security:
