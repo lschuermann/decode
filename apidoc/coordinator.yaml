@@ -27,7 +27,7 @@ paths:
                 $ref: "#/components/schemas/ObjectRetrievalMap"
 
   /v0/object:
-    put:
+    post:
       summary: Upload an object
       security:
         - bearerAuth: []
@@ -51,7 +51,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ObjectUploadMap"
   /v0/object/{objectId}/finalize:
-    post:
+    put:
       summary: Finalize upload of object
       security:
         - bearerAuth: []
