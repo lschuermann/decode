@@ -81,6 +81,33 @@ paths:
       responses:
         '200':
           description: Object uploaded
+  
+  /v0/node:
+    post:
+      summary: Register a new node
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - node_id
+                - shards
+              properties:
+                node_id:
+                  type: string
+                  description: UUID of node
+                shards:
+                  type: array
+                  items:
+                    type: string
+                    description: Sha3-256 digest of shard
+                    
+      responses:
+        '200':
+          description: Node register successfully
 
 components:
   schemas:
@@ -105,16 +132,11 @@ components:
           format: int64
           description: |
             Size of each chunk in bytes (in this example, ~498MB)
-
             The number of chunks in an object can be calculated as
-
                 chunk_count = ceil(object_size / chunk_size)
-
             . Chunks are evenly distributed over the entire object, and the
             start address of a chunk `i` can be calculated as
-
                 chunk_start = i * chunk_size
-
             . In case `object_size` is not evenly divisible by `chunk_size`,
             the last chunk may be smaller than `chunk_size`, its size can
             be calculated as `object_size mod chunk_size`.
@@ -124,16 +146,11 @@ components:
           format: int64
           description: |
             Size of each shard in bytes (in this example, ~49MB)
-
             The number of shards in a chunk can be calculated as
-
                 shard_count = ceil(chunk_size / shard_size)
-
             . Shards are evenly distributed over a chunk, and the
             start address of a shard `i` can be calculated as
-
                 shard_start = i * shard_size
-
             . In case `chunk_size` is not evenly divisible by `shard_size`,
             the last shard may be smaller than `shard_size`, its size can
             be calculated as `chunk_size mod shard_size`. For purposes of
@@ -193,16 +210,11 @@ components:
           format: int64
           description: |
             Size of each chunk in bytes (in this example, ~498MB)
-
             The number of chunks in an object can be calculated as
-
                 chunk_count = ceil(object_size / chunk_size)
-
             . Chunks are evenly distributed over the entire object, and the
             start address of a chunk `i` can be calculated as
-
                 chunk_start = i * chunk_size
-
             . In case `object_size` is not evenly divisible by `chunk_size`,
             the last chunk may be smaller than `chunk_size`, its size can
             be calculated as `object_size mod chunk_size`.
@@ -212,16 +224,11 @@ components:
           format: int64
           description: |
             Size of each shard in bytes (in this example, ~49MB)
-
             The number of shards in a chunk can be calculated as
-
                 shard_count = ceil(chunk_size / shard_size)
-
             . Shards are evenly distributed over a chunk, and the
             start address of a shard `i` can be calculated as
-
                 shard_start = i * shard_size
-
             . In case `chunk_size` is not evenly divisible by `shard_size`,
             the last shard may be smaller than `shard_size`, its size can
             be calculated as `chunk_size mod shard_size`. For purposes of
