@@ -17,9 +17,8 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 migrate = Migrate(app, db)
 
-from models.objects import Object
+from models.objects import Object, Chunk, Shard
 
-# with open("config.toml", "rb") as f:
 config = toml.load("config.toml")
 max_data_shards = config['erasure_code']['max_data_shards']
 parity_shards = config['erasure_code']['parity_shards']
@@ -159,6 +158,40 @@ def upload_object():
         "signature": "SIGNATURE"
     }
     
+@app.route("/v0/object/<objectID>/finalize", methods = ["PUT"])
+def finalize_object(objectID):
+    if not ensure_json():
+        return json_error()
+    body = request.json
 
+    # Defer checking of all deferrable PostgreSQL constraints
+    # to allow cross-references to exist between rows of a
+    # single transaction.
+    db.session.execute("SET CONSTRAINTS ALL DEFERRED")
 
+    object = Object(
+        id=objectID,
+        size=int(body["object_upload_map"]["object_size"]),
+        chunk_size=int(body["object_upload_map"]["chunk_size"]),
+        shard_size=int(body["object_upload_map"]["shard_size"]),
+        code_ratio_data=int(body["object_upload_map"]["code_ratio_data"]),
+        code_ratio_parity=int(body["object_upload_map"]["code_ratio_parity"])
+    )
+    db.session.add(object)
 
+    upload_results= body["upload_results"]
+    prev_chunk_index = None
+    for i in upload_results:
+        chunk_index = int(i["chunk_index"])
+        if prev_chunk_index == None or prev_chunk_index != chunk_index:
+            prev_chunk_index = chunk_index
+            chunk = Chunk(objectID, chunk_index)
+            db.session.add(chunk)
+        shard_index = int(i["shard_index"])
+        digest = bytearray.fromhex(i["digest"])
+        # receipt = i["receipt"] # Ideally should check the vadility of the receipt
+        shard = Shard(objectID, chunk_index, shard_index, digest)
+        db.session.add(shard)
+
+    db.session.commit()
+    return make_response("", status.HTTP_200_OK)
