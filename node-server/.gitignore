@@ -1,0 +1,5 @@
+# Ignore server configuration file
+/DecodeNode.toml
+
+# Ignore shards directory in node-server
+/shards/
