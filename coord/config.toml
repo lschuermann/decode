@@ -1,0 +1,7 @@
+# Basic Coordinator Configuration
+[erasure_code]
+max_data_shards = 5
+parity_shards = 2
+[shard_size] # in Bytes
+max_shard_size = 52428800 # 50MB
+min_shard_size = 5242880
