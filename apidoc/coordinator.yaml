@@ -251,7 +251,7 @@ components:
               type: object
               required:
                 - ticket
-                - nodes
+                - node
               properties:
                 ticket:
                   type: string
@@ -271,3 +271,4 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      
