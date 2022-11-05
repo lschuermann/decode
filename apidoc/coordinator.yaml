@@ -68,14 +68,31 @@ paths:
             schema:
               type: object
               required:
-                - receipts
+                - upload_results
                 - object_upload_map
               properties:
-                receipts:
+                upload_results:
                   type: array
                   items:
-                    type: string
-                    description: Node upload receipts
+                    type: object
+                    required:
+                      - chunk_index
+                      - shard_index
+                      - digest
+                      - receipt
+                    properties:
+                      chunk_index:
+                        type: integer
+                        description: Index of the chunk into all chunks
+                      shard_index:
+                        type: integer
+                        description: Index of the shard into corresponding chunk
+                      digest:
+                        type: string
+                        description: Sha3-256 digest of shard
+                      receipt:
+                        type: string
+                        description: Receipt from uploading to node
                 object_upload_map:
                   $ref: "#/components/schemas/ObjectUploadMap"
       responses:
