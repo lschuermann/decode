@@ -156,6 +156,12 @@ pub struct ObjectUploadMap {
     pub other: Map<String, Value>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ObjectCreateRequest {
+    /// Size of the object to create in bytes
+    pub object_size: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 #[serde(deny_unknown_fields)]
