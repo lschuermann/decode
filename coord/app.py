@@ -4,6 +4,9 @@ from flask import Flask, request, jsonify, request, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_api import status
+import toml
+import math
+import uuid
 
 from database import db
 
@@ -15,6 +18,14 @@ db.init_app(app)
 migrate = Migrate(app, db)
 
 from models.objects import Object
+
+# with open("config.toml", "rb") as f:
+config = toml.load("config.toml")
+max_data_shards = config['erasure_code']['max_data_shards']
+parity_shards = config['erasure_code']['parity_shards']
+max_shard_size = config['shard_size']['max_shard_size']
+min_shard_size = config['shard_size']['min_shard_size']
+max_chunk_size = max_shard_size * max_data_shards
 
 class ShardNodeMap:
     def __init__(self):
@@ -120,7 +131,33 @@ def upload_object():
     if not ensure_json():
         return json_error()
     body = request.json
-    object_size = body['object_size']
+    object_size = int(body['object_size'])
+    num_chunck = math.ceil(object_size / max_chunk_size)
+    size_chunk = math.ceil(object_size / num_chunck)
+    num_data_shards = min(math.ceil(size_chunk / min_shard_size), max_data_shards)
+    size_shard = math.ceil(size_chunk / num_data_shards)
+    shard_map = []
+    uuid_file = uuid.uuid5(uuid.NAMESPACE_DNS, 'object.txt') #PLACEHOLDER for now
+    node_url = "Node_URL" #PLACEHOLDER for now
+    for i in range(num_chunck):
+        chunk = []
+        for j in range(num_data_shards):
+            chunk.append({
+                "ticket": "RANDOM_TICKET" ,
+                "node": node_url,
+            })
+        shard_map.append(chunk)
+
+    return {
+        "object_size": object_size,
+        "chunk_size": size_chunk,
+        "shard_size": size_shard,
+        "code_ratio_data": num_data_shards,
+        "code_ratio_parity": parity_shards,
+        "shard_map": shard_map,
+        "object_id": uuid_file,
+        "signature": "SIGNATURE"
+    }
     
 
 
