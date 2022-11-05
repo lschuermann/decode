@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::num::NonZeroU16;
 
 use serde::{Serialize, Deserialize};
 use serde_json::{Map, Value};
@@ -159,7 +160,7 @@ pub struct ObjectUploadMap {
 #[serde(tag = "type")]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
-pub enum APIError<'desc> {
+pub enum APIError<'desc, 'resp_body> {
     /// An unexpected, internal server error
     ///
     /// An unexpected internal server error occurred. The inner
@@ -167,4 +168,21 @@ pub enum APIError<'desc> {
     /// error. Please submit a bug report when encountering this
     /// error.
     InternalServerError { description: Cow<'desc, str> },
+
+    /// We are unable to parse the error response
+    InvalidErrorResponse {
+	/// The HTTP error code provided by the coordinator
+	///
+	/// The error code should never exceed a 3-digit stricly
+	/// positive integer. We wrap it into an Option<NonZeroU16>
+	/// nonetheless to capture the case whether the request has a
+	/// malformed error code.
+	code: Option<NonZeroU16>,
+
+	/// The HTTP response body represented as a byte slice
+	///
+	/// This is not represented as a string as it might not be
+	/// valid UTF-8.
+	resp_body: Option<Cow<'resp_body, [u8]>>,
+    },
 }
