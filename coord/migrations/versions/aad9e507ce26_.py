@@ -28,7 +28,7 @@ def upgrade():
     op.create_table('chunks',
     sa.Column('object_id', postgresql.UUID(), nullable=False),
     sa.Column('chunk_index', sa.Integer(), nullable=False),
-    sa.ForeignKeyConstraint(['object_id'], ['objects.id'], ),
+    sa.ForeignKeyConstraint(['object_id'], ['objects.id'], deferrable=True),
     sa.PrimaryKeyConstraint('object_id', 'chunk_index')
     )
     op.create_table('shards',
@@ -36,7 +36,7 @@ def upgrade():
     sa.Column('chunk_index', sa.Integer(), nullable=False),
     sa.Column('shard_index', sa.Integer(), nullable=False),
     sa.Column('shard_hash', sa.LargeBinary(length=32), nullable=False),
-    sa.ForeignKeyConstraint(['object_id', 'chunk_index'], ['chunks.object_id', 'chunks.chunk_index'], ),
+    sa.ForeignKeyConstraint(['object_id', 'chunk_index'], ['chunks.object_id', 'chunks.chunk_index'], deferrable=True),
     sa.PrimaryKeyConstraint('object_id', 'chunk_index', 'shard_index')
     )
     # ### end Alembic commands ###
