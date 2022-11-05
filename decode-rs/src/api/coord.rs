@@ -156,7 +156,7 @@ pub struct ObjectUploadMap {
     pub other: Map<String, Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
