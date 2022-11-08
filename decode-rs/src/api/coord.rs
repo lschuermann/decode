@@ -180,15 +180,15 @@ pub enum APIError<'desc, 'resp_body> {
     /// error.
     InternalServerError { description: Cow<'desc, str> },
 
-    /// We are unable to parse the error response
-    InvalidErrorResponse {
+    /// We are unable to parse the response
+    InvalidResponse {
         /// The HTTP error code provided by the coordinator
         ///
         /// The error code should never exceed a 3-digit stricly
         /// positive integer. We wrap it into an Option<NonZeroU16>
         /// nonetheless to capture the case whether the request has a
         /// malformed error code.
-        code: Option<NonZeroU16>,
+        status: Option<NonZeroU16>,
 
         /// The HTTP response body represented as a byte slice
         ///
@@ -207,7 +207,7 @@ impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
             // InvalidServerResponse does not have an error code
             // associated with it, however we will interpret a zero
             // error code to be an InvalidServerResponse:
-            APIError::InvalidErrorResponse { .. } => 0,
+            APIError::InvalidResponse { .. } => 0,
         }
     }
 
@@ -216,8 +216,8 @@ impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
             APIError::InternalServerError { description } => APIError::InternalServerError {
                 description: Cow::Owned(description.into_owned()),
             },
-            APIError::InvalidErrorResponse { resp_body, code } => APIError::InvalidErrorResponse {
-                code,
+            APIError::InvalidResponse { status, resp_body } => APIError::InvalidResponse {
+                status,
                 resp_body: resp_body.map(|b| Cow::Owned(b.into_owned())),
             },
         }
