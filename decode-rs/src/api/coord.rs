@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::num::NonZeroU16;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use uuid::Uuid;
@@ -71,16 +71,21 @@ pub struct ObjectRetrievalMap {
 }
 
 impl ObjectRetrievalMap {
-    pub fn get_shard_node<'a>(&'a self, chunk_idx: usize, shard_idx: usize, node_idx: usize) -> Option<&'a str> {
-	let node_map_idx = self.shard_map
-	    .get(chunk_idx)?
-	    .get(shard_idx)?
-	    .nodes
-	    .get(node_idx)?;
-	self.node_map.get(*node_map_idx).map(|s| s.as_ref())
+    pub fn get_shard_node<'a>(
+        &'a self,
+        chunk_idx: usize,
+        shard_idx: usize,
+        node_idx: usize,
+    ) -> Option<&'a str> {
+        let node_map_idx = self
+            .shard_map
+            .get(chunk_idx)?
+            .get(shard_idx)?
+            .nodes
+            .get(node_idx)?;
+        self.node_map.get(*node_map_idx).map(|s| s.as_ref())
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectUploadShardSpec {
@@ -177,18 +182,18 @@ pub enum APIError<'desc, 'resp_body> {
 
     /// We are unable to parse the error response
     InvalidErrorResponse {
-	/// The HTTP error code provided by the coordinator
-	///
-	/// The error code should never exceed a 3-digit stricly
-	/// positive integer. We wrap it into an Option<NonZeroU16>
-	/// nonetheless to capture the case whether the request has a
-	/// malformed error code.
-	code: Option<NonZeroU16>,
+        /// The HTTP error code provided by the coordinator
+        ///
+        /// The error code should never exceed a 3-digit stricly
+        /// positive integer. We wrap it into an Option<NonZeroU16>
+        /// nonetheless to capture the case whether the request has a
+        /// malformed error code.
+        code: Option<NonZeroU16>,
 
-	/// The HTTP response body represented as a byte slice
-	///
-	/// This is not represented as a string as it might not be
-	/// valid UTF-8.
-	resp_body: Option<Cow<'resp_body, [u8]>>,
+        /// The HTTP response body represented as a byte slice
+        ///
+        /// This is not represented as a string as it might not be
+        /// valid UTF-8.
+        resp_body: Option<Cow<'resp_body, [u8]>>,
     },
 }
