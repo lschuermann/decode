@@ -167,6 +167,80 @@ pub struct ObjectCreateRequest {
     pub object_size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub enum ObjectCreateResponse<'desc, 'resp_body> {
+    /// Object create request was successfull, the client is provided
+    /// with an object upload map.
+    Success(ObjectUploadMap),
+    /// An error was returned in response to the object create
+    /// request. The error has been deserialized into the
+    /// corresponding field.
+    APIError(APIError<'desc, 'resp_body>),
+}
+
+impl<'desc, 'resp_body> ObjectCreateResponse<'desc, 'resp_body> {
+    pub fn from_bytes<'a: 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
+        // Try to parse as success type first:
+        serde_json::from_slice::<'a, ObjectUploadMap>(bytes)
+            .map(ObjectCreateResponse::Success)
+            .or_else(|_| {
+                serde_json::from_slice::<'a, APIError<'a, 'a>>(bytes)
+                    .map(ObjectCreateResponse::APIError)
+            })
+            .unwrap_or_else(|_| {
+                ObjectCreateResponse::APIError(APIError::InvalidResponse {
+                    status: None,
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            })
+    }
+
+    pub fn from_http_resp<'a: 'desc + 'resp_body>(status: NonZeroU16, bytes: &'a [u8]) -> Self {
+        // Use the regular `from_bytes` to parse:
+        let mut parsed = Self::from_bytes(bytes);
+
+        // When we've gotten a parsed success and/or error, check that
+        // the expected HTTP response code matches the passed one. If
+        // not, return an [`APIError::InvalidResponse`].
+        let expected_status = match parsed {
+            ObjectCreateResponse::Success(_) => Some(NonZeroU16::new(200).unwrap()),
+            ObjectCreateResponse::APIError(ref err) => err.http_status_code(),
+        };
+
+        if let Some(expected_status_code) = expected_status {
+            if expected_status_code != status {
+                ObjectCreateResponse::APIError(APIError::InvalidResponse {
+                    status: Some(status),
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            } else {
+                // Parsing worked, code matches
+                parsed
+            }
+        } else {
+            // Parsing did not yield a success variant OR an error
+            // with an expected status, pass the parsed result (which
+            // likely is a [`APIError::InvalidResponse`])
+            // through and set the actual received status:
+            if let ObjectCreateResponse::APIError(ref mut api_err) = &mut parsed {
+                api_err.set_invalid_response_status_code(status);
+            }
+            parsed
+        }
+    }
+
+    pub fn into_owned(self) -> ObjectCreateResponse<'static, 'static> {
+        match self {
+            ObjectCreateResponse::Success(object_upload_map) => {
+                ObjectCreateResponse::Success(object_upload_map)
+            }
+            ObjectCreateResponse::APIError(api_error) => {
+                ObjectCreateResponse::APIError(api_error.into_owned())
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ResponseBody<'a>(pub Cow<'a, [u8]>);
 impl std::fmt::Debug for ResponseBody<'_> {
@@ -217,6 +291,12 @@ impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
 
             // InvalidResponse does not have an associated HTTP status code.
             APIError::InvalidResponse { .. } => None,
+        }
+    }
+
+    pub fn set_invalid_response_status_code(&mut self, new_status: NonZeroU16) {
+        if let APIError::InvalidResponse { ref mut status, .. } = self {
+            *status = Some(new_status);
         }
     }
 
