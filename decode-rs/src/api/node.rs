@@ -73,21 +73,19 @@ impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
         })
     }
 
-    pub fn http_status_code(&self) -> u16 {
+    pub fn http_status_code(&self) -> Option<NonZeroU16> {
         match self {
             // 413: Payload Too Large
-            APIError::ShardTooLarge { .. } => 413,
+            APIError::ShardTooLarge { .. } => Some(NonZeroU16::new(413).unwrap()),
 
             // 404: Not Found
-            APIError::ResourceNotFound { .. } => 404,
+            APIError::ResourceNotFound { .. } => Some(NonZeroU16::new(404).unwrap()),
 
             // 500: Internal Server Error
-            APIError::InternalServerError { .. } => 500,
+            APIError::InternalServerError { .. } => Some(NonZeroU16::new(500).unwrap()),
 
-            // InvalidServerResponse does not have an error code
-            // associated with it, however we will interpret a zero
-            // error code to be an InvalidServerResponse:
-            APIError::InvalidResponse { .. } => 0,
+            // InvalidResponse does not have an associated HTTP status code.
+            APIError::InvalidResponse { .. } => None,
         }
     }
 

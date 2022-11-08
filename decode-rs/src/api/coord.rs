@@ -199,15 +199,13 @@ pub enum APIError<'desc, 'resp_body> {
 }
 
 impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
-    pub fn http_status_code(&self) -> u16 {
+    pub fn http_status_code(&self) -> Option<NonZeroU16> {
         match self {
             // 500: Internal Server Error
-            APIError::InternalServerError { .. } => 500,
+            APIError::InternalServerError { .. } => Some(NonZeroU16::new(500).unwrap()),
 
-            // InvalidServerResponse does not have an error code
-            // associated with it, however we will interpret a zero
-            // error code to be an InvalidServerResponse:
-            APIError::InvalidResponse { .. } => 0,
+            // InvalidResponse does not have an associated HTTP status code.
+            APIError::InvalidResponse { .. } => None,
         }
     }
 
