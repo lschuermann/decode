@@ -16,6 +16,16 @@ const FALLBACK_API_ERROR: &'static str = "{\
     \"}\
 ";
 
+#[derive(Clone)]
+pub struct ResponseBody<'a>(pub Cow<'a, [u8]>);
+impl std::fmt::Debug for ResponseBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_tuple("ResponseBody")
+            .field(&String::from_utf8_lossy(&self.0))
+            .finish()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 #[serde(deny_unknown_fields)]
@@ -42,6 +52,7 @@ pub enum APIError<'desc, 'resp_body> {
     InternalServerError { description: Cow<'desc, str> },
 
     /// We are unable to parse the error response
+    #[serde(skip)]
     InvalidResponse {
         /// The HTTP error code provided by the coordinator
         ///
@@ -55,7 +66,7 @@ pub enum APIError<'desc, 'resp_body> {
         ///
         /// This is not represented as a string as it might not be
         /// valid UTF-8.
-        resp_body: Option<Cow<'resp_body, [u8]>>,
+        resp_body: Option<ResponseBody<'resp_body>>,
     },
 }
 
@@ -109,7 +120,7 @@ impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
 
             APIError::InvalidResponse { status, resp_body } => APIError::InvalidResponse {
                 status,
-                resp_body: resp_body.map(|b| Cow::Owned(b.into_owned())),
+                resp_body: resp_body.map(|b| ResponseBody(Cow::Owned(b.0.into_owned()))),
             },
         }
     }
