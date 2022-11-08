@@ -90,6 +90,31 @@ impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
             APIError::InvalidErrorResponse { .. } => 0,
         }
     }
+
+    pub fn into_owned(self) -> APIError<'static, 'static> {
+        match self {
+            APIError::ShardTooLarge {
+                max_bytes,
+                description,
+            } => APIError::ShardTooLarge {
+                max_bytes,
+                description: Cow::Owned(description.into_owned()),
+            },
+
+            APIError::ResourceNotFound { description } => APIError::ResourceNotFound {
+                description: Cow::Owned(description.into_owned()),
+            },
+
+            APIError::InternalServerError { description } => APIError::InternalServerError {
+                description: Cow::Owned(description.into_owned()),
+            },
+
+            APIError::InvalidErrorResponse { code, resp_body } => APIError::InvalidErrorResponse {
+                code,
+                resp_body: resp_body.map(|b| Cow::Owned(b.into_owned())),
+            },
+        }
+    }
 }
 
 #[test]

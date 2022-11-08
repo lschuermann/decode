@@ -210,4 +210,16 @@ impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
             APIError::InvalidErrorResponse { .. } => 0,
         }
     }
+
+    pub fn into_owned(self) -> APIError<'static, 'static> {
+        match self {
+            APIError::InternalServerError { description } => APIError::InternalServerError {
+                description: Cow::Owned(description.into_owned()),
+            },
+            APIError::InvalidErrorResponse { resp_body, code } => APIError::InvalidErrorResponse {
+                code,
+                resp_body: resp_body.map(|b| Cow::Owned(b.into_owned())),
+            },
+        }
+    }
 }
