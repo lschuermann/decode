@@ -197,3 +197,17 @@ pub enum APIError<'desc, 'resp_body> {
         resp_body: Option<Cow<'resp_body, [u8]>>,
     },
 }
+
+impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
+    pub fn http_status_code(&self) -> u16 {
+        match self {
+            // 500: Internal Server Error
+            APIError::InternalServerError { .. } => 500,
+
+            // InvalidServerResponse does not have an error code
+            // associated with it, however we will interpret a zero
+            // error code to be an InvalidServerResponse:
+            APIError::InvalidErrorResponse { .. } => 0,
+        }
+    }
+}
