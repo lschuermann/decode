@@ -126,6 +126,35 @@ paths:
         '200':
           description: Node register successfully
 
+  /v0/node/report:
+    post:
+      summary: Report node status periodically
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: 
+                - disk_usage
+                - bandwidth
+                - cpu_usage
+              properties:
+                disk_usage:
+                  type: integer
+                  description: disk usage in percentage
+                bandwidth:
+                  type: integer
+                  description: bandwidth usage in percentage
+                cpu_usage:
+                  type: integer
+                  description: cpu usage in percentage
+      responses:
+        '200':
+          description: Node report successfully
+                  
+                  
 components:
   schemas:
     ObjectRetrievalMap:
