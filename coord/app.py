@@ -1,7 +1,6 @@
 import os
 
 from flask import Flask, request, jsonify, request, make_response
-from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_api import status
 import toml
@@ -34,7 +33,6 @@ class ShardNodeMap:
     def add_node(self, node_id, shards):
         if type(shards) == list:
             shards = set(shards)
-
         self.node_to_shards[node_id] = shards
 
         for shard in shards:
@@ -77,6 +75,13 @@ class ShardNodeMap:
         return self.node_to_shards[node_id]
 
 shard_node_map = ShardNodeMap()
+
+# Store the node index in NodeMap for shard digest
+# Used in ObjectRetrieval
+class DigestNodesMap:
+    def __init__(self, digest, nodemap_index):
+        self.digest = digest
+        self.nodemap_index = nodemap_index
 
 @app.route("/")
 def hello():
@@ -179,8 +184,10 @@ def finalize_object(objectID):
     )
     db.session.add(object)
 
+    # "upload_results" lists shards in order. e.g., 
+    # (chunk0, shard0), (chunk0, shard1), (chunk1, shard0), (chunk1, shard1)
     upload_results= body["upload_results"]
-    prev_chunk_index = None
+    prev_chunk_index = None 
     for i in upload_results:
         chunk_index = int(i["chunk_index"])
         if prev_chunk_index == None or prev_chunk_index != chunk_index:
@@ -195,3 +202,41 @@ def finalize_object(objectID):
 
     db.session.commit()
     return make_response("", status.HTTP_200_OK)
+
+@app.route("/v0/object/<objectID>", methods = ["GET"])
+def retrieve_object(objectID):
+    # Only one object row corresponding to the objectID
+    object = db.session.query(Object).filter_by(id=objectID)
+
+    chunks = db.session.query(Chunk).filter_by(object_id=objectID)  
+    node_map = []
+    all_chunks = []
+    for chunk in chunks:
+        one_chunk = []
+        chunk_index = chunk.chunk_index
+        shards = db.session.query(Shard).filter_by(object_id=objectID, chunk_index=chunk_index)
+        for shard in shards:
+            digest = shard.shard_hash
+            nodemap_index = []
+            nodes = shard_node_map.get_shard_nodes(digest)
+            for node in nodes:
+                try:
+                    index = node_map.index(node)
+                    nodemap_index.append(index)
+                except:
+                    node_map.append(node)
+                    nodemap_index.append(len(node_map) - 1)                    
+            one_chunk.append(DigestNodesMap(digest, nodemap_index))
+        all_chunks.append(one_chunk)
+
+    return {
+        {
+            "object_size": object[0].object_size,
+            "chunk_size": object[0].chunk_size,
+            "shard_size": object[0].shard_size,
+            "code_ratio_data": object[0].code_ratio_data,
+            "code_ratio_parity": object[0].code_ratio_parity,
+            "shard_map": all_chunks,
+            "node_map": node_map
+        }
+    }    
