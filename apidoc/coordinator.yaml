@@ -112,6 +112,7 @@ paths:
               required:
                 - node_id
                 - shards
+                - report
               properties:
                 node_id:
                   type: string
@@ -121,16 +122,41 @@ paths:
                   items:
                     type: string
                     description: Sha3-256 digest of shard
+                report:
+                  type: object
+                  required: 
+                    - disk_usage
+                    - bandwidth
+                    - cpu_usage
+                  properties:
+                    disk_usage:
+                      type: integer
+                      description: disk usage in percentage
+                    bandwidth:
+                      type: integer
+                      description: bandwidth usage in percentage
+                    cpu_usage:
+                      type: integer
+                      description: cpu usage in percentage
+                  
                     
       responses:
         '200':
           description: Node register successfully
 
-  /v0/node/report:
+  # /v0/object/{objectId}/finalize:
+  /v0/node/{nodeId}/report:
     post:
       summary: Report node status periodically
       security:
         - bearerAuth: []
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: node id
+          schema:
+            type: string
       requestBody:
         content:
           application/json:
