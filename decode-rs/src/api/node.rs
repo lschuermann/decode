@@ -107,6 +107,12 @@ impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
         }
     }
 
+    pub fn set_invalid_response_status_code(&mut self, new_status: NonZeroU16) {
+        if let APIError::InvalidResponse { ref mut status, .. } = self {
+            *status = Some(new_status);
+        }
+    }
+
     pub fn into_owned(self) -> APIError<'static, 'static> {
         match self {
             APIError::ShardTooLarge {
@@ -149,5 +155,102 @@ fn test_fallback_api_error_deserialize() {
 
         // In all other cases, fail the test
         _ => panic!("Fallback API error deserialized to unexpected variant!"),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardInfo<'digest> {
+    /// Hex-encoded SHA3-256 digest of the uploaded shard
+    #[serde(borrow)]
+    pub digest: Cow<'digest, str>,
+
+    /// Shard size in bytes
+    pub size: u64,
+}
+
+impl ShardInfo<'_> {
+    pub fn into_owned(self) -> ShardInfo<'static> {
+        ShardInfo {
+            digest: Cow::Owned(self.digest.into_owned()),
+            size: self.size,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ShardUploadResponse<'digest, 'desc, 'resp_body> {
+    /// The shard was uploaded successfully, we are returned some
+    /// metadata.
+    Success(ShardInfo<'digest>),
+
+    /// An error was returned in response to the shard upload
+    /// request. The error has been deserialized into the
+    /// corresponding field.
+    APIError(APIError<'desc, 'resp_body>),
+}
+
+impl<'digest, 'desc, 'resp_body> ShardUploadResponse<'digest, 'desc, 'resp_body> {
+    pub fn from_bytes<'a: 'digest + 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
+        // Try to parse as success type first:
+        serde_json::from_slice::<'a, ShardInfo>(bytes)
+            .map(ShardUploadResponse::Success)
+            .or_else(|_| {
+                serde_json::from_slice::<'a, APIError<'a, 'a>>(bytes)
+                    .map(ShardUploadResponse::APIError)
+            })
+            .unwrap_or_else(|_| {
+                ShardUploadResponse::APIError(APIError::InvalidResponse {
+                    status: None,
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            })
+    }
+
+    pub fn from_http_resp<'a: 'digest + 'desc + 'resp_body>(
+        status: NonZeroU16,
+        bytes: &'a [u8],
+    ) -> Self {
+        // Use the regular `from_bytes` to parse:
+        let mut parsed = Self::from_bytes(bytes);
+
+        // When we've gotten a parsed success and/or error, check that
+        // the expected HTTP response code matches the passed one. If
+        // not, return an [`APIError::InvalidResponse`].
+        let expected_status = match parsed {
+            ShardUploadResponse::Success(_) => Some(NonZeroU16::new(200).unwrap()),
+            ShardUploadResponse::APIError(ref err) => err.http_status_code(),
+        };
+
+        if let Some(expected_status_code) = expected_status {
+            if expected_status_code != status {
+                ShardUploadResponse::APIError(APIError::InvalidResponse {
+                    status: Some(status),
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            } else {
+                // Parsing worked, code matches
+                parsed
+            }
+        } else {
+            // Parsing did not yield a success variant OR an error
+            // with an expected status, pass the parsed result (which
+            // likely is a [`APIError::InvalidResponse`])
+            // through and set the actual received status:
+            if let ShardUploadResponse::APIError(ref mut api_err) = &mut parsed {
+                api_err.set_invalid_response_status_code(status);
+            }
+            parsed
+        }
+    }
+
+    pub fn into_owned(self) -> ShardUploadResponse<'static, 'static, 'static> {
+        match self {
+            ShardUploadResponse::Success(object_upload_map) => {
+                ShardUploadResponse::Success(object_upload_map.into_owned())
+            }
+            ShardUploadResponse::APIError(api_error) => {
+                ShardUploadResponse::APIError(api_error.into_owned())
+            }
+        }
     }
 }
