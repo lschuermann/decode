@@ -7,8 +7,7 @@ edition = "2021"
 
 [dependencies]
 decode-rs = { path = "../decode-rs" }
-
-rocket = { version = "0.5.0-rc.2" }
+rocket = { version = "0.5.0-rc.2", features = ["json"] }
 figment = { version = "0.10.6", features = ["toml"] }
 serde = { version = "1.0.146" }
 tokio = { version = "1.21.2" }

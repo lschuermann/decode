@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::num::NonZeroU16;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use uuid::Uuid;
@@ -71,16 +71,21 @@ pub struct ObjectRetrievalMap {
 }
 
 impl ObjectRetrievalMap {
-    pub fn get_shard_node<'a>(&'a self, chunk_idx: usize, shard_idx: usize, node_idx: usize) -> Option<&'a str> {
-	let node_map_idx = self.shard_map
-	    .get(chunk_idx)?
-	    .get(shard_idx)?
-	    .nodes
-	    .get(node_idx)?;
-	self.node_map.get(*node_map_idx).map(|s| s.as_ref())
+    pub fn get_shard_node<'a>(
+        &'a self,
+        chunk_idx: usize,
+        shard_idx: usize,
+        node_idx: usize,
+    ) -> Option<&'a str> {
+        let node_map_idx = self
+            .shard_map
+            .get(chunk_idx)?
+            .get(shard_idx)?
+            .nodes
+            .get(node_idx)?;
+        self.node_map.get(*node_map_idx).map(|s| s.as_ref())
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectUploadShardSpec {
@@ -162,6 +167,90 @@ pub struct ObjectCreateRequest {
     pub object_size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub enum ObjectCreateResponse<'desc, 'resp_body> {
+    /// Object create request was successfull, the client is provided
+    /// with an object upload map.
+    Success(ObjectUploadMap),
+    /// An error was returned in response to the object create
+    /// request. The error has been deserialized into the
+    /// corresponding field.
+    APIError(APIError<'desc, 'resp_body>),
+}
+
+impl<'desc, 'resp_body> ObjectCreateResponse<'desc, 'resp_body> {
+    pub fn from_bytes<'a: 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
+        // Try to parse as success type first:
+        serde_json::from_slice::<'a, ObjectUploadMap>(bytes)
+            .map(ObjectCreateResponse::Success)
+            .or_else(|_| {
+                serde_json::from_slice::<'a, APIError<'a, 'a>>(bytes)
+                    .map(ObjectCreateResponse::APIError)
+            })
+            .unwrap_or_else(|_| {
+                ObjectCreateResponse::APIError(APIError::InvalidResponse {
+                    status: None,
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            })
+    }
+
+    pub fn from_http_resp<'a: 'desc + 'resp_body>(status: NonZeroU16, bytes: &'a [u8]) -> Self {
+        // Use the regular `from_bytes` to parse:
+        let mut parsed = Self::from_bytes(bytes);
+
+        // When we've gotten a parsed success and/or error, check that
+        // the expected HTTP response code matches the passed one. If
+        // not, return an [`APIError::InvalidResponse`].
+        let expected_status = match parsed {
+            ObjectCreateResponse::Success(_) => Some(NonZeroU16::new(200).unwrap()),
+            ObjectCreateResponse::APIError(ref err) => err.http_status_code(),
+        };
+
+        if let Some(expected_status_code) = expected_status {
+            if expected_status_code != status {
+                ObjectCreateResponse::APIError(APIError::InvalidResponse {
+                    status: Some(status),
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            } else {
+                // Parsing worked, code matches
+                parsed
+            }
+        } else {
+            // Parsing did not yield a success variant OR an error
+            // with an expected status, pass the parsed result (which
+            // likely is a [`APIError::InvalidResponse`])
+            // through and set the actual received status:
+            if let ObjectCreateResponse::APIError(ref mut api_err) = &mut parsed {
+                api_err.set_invalid_response_status_code(status);
+            }
+            parsed
+        }
+    }
+
+    pub fn into_owned(self) -> ObjectCreateResponse<'static, 'static> {
+        match self {
+            ObjectCreateResponse::Success(object_upload_map) => {
+                ObjectCreateResponse::Success(object_upload_map)
+            }
+            ObjectCreateResponse::APIError(api_error) => {
+                ObjectCreateResponse::APIError(api_error.into_owned())
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ResponseBody<'a>(pub Cow<'a, [u8]>);
+impl std::fmt::Debug for ResponseBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_tuple("ResponseBody")
+            .field(&String::from_utf8_lossy(&self.0))
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 #[serde(deny_unknown_fields)]
@@ -173,22 +262,56 @@ pub enum APIError<'desc, 'resp_body> {
     /// description may contain more information about the
     /// error. Please submit a bug report when encountering this
     /// error.
-    InternalServerError { description: Cow<'desc, str> },
-
-    /// We are unable to parse the error response
-    InvalidErrorResponse {
-	/// The HTTP error code provided by the coordinator
-	///
-	/// The error code should never exceed a 3-digit stricly
-	/// positive integer. We wrap it into an Option<NonZeroU16>
-	/// nonetheless to capture the case whether the request has a
-	/// malformed error code.
-	code: Option<NonZeroU16>,
-
-	/// The HTTP response body represented as a byte slice
-	///
-	/// This is not represented as a string as it might not be
-	/// valid UTF-8.
-	resp_body: Option<Cow<'resp_body, [u8]>>,
+    InternalServerError {
+        #[serde(borrow)]
+        description: Cow<'desc, str>,
     },
+
+    /// We are unable to parse the response
+    #[serde(skip)]
+    InvalidResponse {
+        /// The HTTP error code provided by the coordinator
+        ///
+        /// The error code should never exceed a 3-digit stricly
+        /// positive integer. We wrap it into an Option<NonZeroU16>
+        /// nonetheless to capture the case whether the request has a
+        /// malformed error code.
+        status: Option<NonZeroU16>,
+
+        /// The HTTP response body represented as a byte slice
+        ///
+        /// This is not represented as a string as it might not be
+        /// valid UTF-8.
+        resp_body: Option<ResponseBody<'resp_body>>,
+    },
+}
+
+impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
+    pub fn http_status_code(&self) -> Option<NonZeroU16> {
+        match self {
+            // 500: Internal Server Error
+            APIError::InternalServerError { .. } => Some(NonZeroU16::new(500).unwrap()),
+
+            // InvalidResponse does not have an associated HTTP status code.
+            APIError::InvalidResponse { .. } => None,
+        }
+    }
+
+    pub fn set_invalid_response_status_code(&mut self, new_status: NonZeroU16) {
+        if let APIError::InvalidResponse { ref mut status, .. } = self {
+            *status = Some(new_status);
+        }
+    }
+
+    pub fn into_owned(self) -> APIError<'static, 'static> {
+        match self {
+            APIError::InternalServerError { description } => APIError::InternalServerError {
+                description: Cow::Owned(description.into_owned()),
+            },
+            APIError::InvalidResponse { status, resp_body } => APIError::InvalidResponse {
+                status,
+                resp_body: resp_body.map(|b| ResponseBody(Cow::Owned(b.0.into_owned()))),
+            },
+        }
+    }
 }

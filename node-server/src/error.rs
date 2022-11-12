@@ -21,7 +21,7 @@ fn json_error_response<'r>(err: &node_api::APIError) -> Response<'r> {
 
     Response::build()
         .status(Status {
-            code: err.http_status_code(),
+            code: err.http_status_code().map(|s| s.get()).unwrap_or(500),
         })
         .header(ContentType::JSON)
         .sized_body(serialized.len(), Cursor::new(serialized))
@@ -63,7 +63,7 @@ fn not_found(_req: &Request) -> String {
         description: Cow::Borrowed("The requested resource cound not be found."),
     };
 
-    debug_assert!(err.http_status_code() == 404);
+    debug_assert!(err.http_status_code().map(|s| s.get()) == Some(404));
 
     err.serialize_json()
 }
@@ -74,7 +74,7 @@ fn internal_server_error(_req: &Request) -> String {
         description: Cow::Borrowed("An internal server error occured."),
     };
 
-    debug_assert!(err.http_status_code() == 404);
+    debug_assert!(err.http_status_code().map(|s| s.get()) == Some(500));
 
     err.serialize_json()
 }
