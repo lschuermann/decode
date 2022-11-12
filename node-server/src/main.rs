@@ -4,6 +4,7 @@ extern crate rocket;
 use std::borrow::Cow;
 use std::io::ErrorKind as IOErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use rocket::data::{ByteUnit, ToByteUnit};
 use rocket::fairing::AdHoc;
@@ -37,7 +38,7 @@ struct NodeServerState {
     public_url: Url,
     coordinator_url: Url,
     max_shard_size: ByteUnit,
-    shard_store: shard_store::ShardStore<32>,
+    shard_store: Arc<shard_store::ShardStore<32>>,
 }
 
 struct HexDigest<const N: usize> {
@@ -225,19 +226,17 @@ async fn initial_server_state(
             )
         })?,
 
-        shard_store: shard_store::ShardStore::new(
-            PathBuf::from(&parsed_config.shards_path),
-            false,
-            3,
-        )
-        .await
-        .map_err(|err| match err {
-            Ok(lock_id) => format!(
-                "Cannot acquire lock to create ShardStore instance, locked by {}",
-                lock_id
-            ),
-            Err(ioerr) => format!("Cannot create ShardStore instance: {:?}", ioerr),
-        })?,
+        shard_store: Arc::new(
+            shard_store::ShardStore::new(PathBuf::from(&parsed_config.shards_path), false, 3)
+                .await
+                .map_err(|err| match err {
+                    Ok(lock_id) => format!(
+                        "Cannot acquire lock to create ShardStore instance, locked by {}",
+                        lock_id
+                    ),
+                    Err(ioerr) => format!("Cannot create ShardStore instance: {:?}", ioerr),
+                })?,
+        ),
 
         max_shard_size: 10.gibibytes(),
     })
@@ -279,6 +278,34 @@ async fn rocket() -> _ {
         }
     };
 
+    {
+        let shard_store = node_server_state.shard_store.clone();
+        let node_id = node_server_state.node_id.clone();
+        let node_public_url = node_server_state.public_url.clone();
+        let coordinator_url = node_server_state.coordinator_url.clone();
+
+        tokio::spawn(async move {
+            use futures::stream::StreamExt;
+
+            let coord_api_client =
+                decode_rs::api_client::coord::CoordAPIClient::new(coordinator_url.clone());
+            let shards = shard_store
+                .iter_shards()
+                .map(|digest| hex::encode(&digest))
+                .collect()
+                .await;
+            if let Err(e) = coord_api_client
+                .register_node(&node_id, &node_public_url, shards)
+                .await
+            {
+                log::error!("Node registration failed: {:?}", e);
+
+                // TODO: kindly request the server to shutdown
+                std::process::exit(1);
+            }
+        });
+    }
+
     rocket::custom(figment)
         .register("/v0/", error::get_catchers())
         // Mount the error catchers also under the top-level, such
@@ -288,31 +315,4 @@ async fn rocket() -> _ {
         .mount("/v0/", routes![get_shard, post_shard, get_statistics])
         .manage(node_server_state)
         .attach(AdHoc::config::<config::NodeServerConfigInterface>())
-        .attach(AdHoc::on_liftoff("Node Registration Worker", |r| {
-            Box::pin(async move {
-                use futures::stream::StreamExt;
-
-                let node_server_state: &NodeServerState = r.state().unwrap();
-                let coord_api_client = decode_rs::api_client::coord::CoordAPIClient::new(
-                    node_server_state.coordinator_url.clone(),
-                );
-                let shards = node_server_state
-                    .shard_store
-                    .iter_shards()
-                    .map(|digest| hex::encode(&digest))
-                    .collect()
-                    .await;
-                if let Err(e) = coord_api_client
-                    .register_node(
-                        &node_server_state.node_id,
-                        &node_server_state.public_url,
-                        shards,
-                    )
-                    .await
-                {
-                    log::error!("Node registration failed: {:?}", e);
-                    std::process::exit(1);
-                }
-            })
-        }))
 }
