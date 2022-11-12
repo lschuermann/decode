@@ -33,9 +33,9 @@ use decode_rs::api::node as node_api;
 /// Parsed and validated node server configuration, along with other
 /// shared state and instances:
 struct NodeServerState {
-    _node_id: Uuid,
-    _public_url: Url,
-    _coordinator_url: Url,
+    node_id: Uuid,
+    public_url: Url,
+    coordinator_url: Url,
     max_shard_size: ByteUnit,
     shard_store: shard_store::ShardStore<32>,
 }
@@ -193,18 +193,18 @@ async fn initial_server_state(
     parsed_config: config::NodeServerConfigInterface,
 ) -> Result<NodeServerState, String> {
     Ok(NodeServerState {
-        _node_id: parsed_config
+        node_id: parsed_config
             .node_id
             .ok_or("Node needs to be assigned a unique, valid UUID.".to_string())?,
 
-        _public_url: Url::parse(
+        public_url: Url::parse(
             &parsed_config
                 .public_url
                 .ok_or("Node must be supplied its public base URL.".to_string())?,
         )
         .map_err(|err| format!("Failed to parse public base URL configuration: {:?}", err))?,
 
-        _coordinator_url: Url::parse(
+        coordinator_url: Url::parse(
             &parsed_config
                 .coordinator_url
                 .ok_or("Node must be passed the coordinator base URL.".to_string())?,
@@ -277,6 +277,33 @@ async fn rocket() -> _ {
         // specified under any contract and entirely arbitrary)
         .register("/", error::get_catchers())
         .mount("/v0/", routes![get_shard, post_shard])
-        .attach(AdHoc::config::<config::NodeServerConfigInterface>())
         .manage(node_server_state)
+        .attach(AdHoc::config::<config::NodeServerConfigInterface>())
+        .attach(AdHoc::on_liftoff("Node Registration Worker", |r| {
+            Box::pin(async move {
+                use futures::stream::StreamExt;
+
+                let node_server_state: &NodeServerState = r.state().unwrap();
+                let coord_api_client = decode_rs::api_client::coord::CoordAPIClient::new(
+                    node_server_state.coordinator_url.clone(),
+                );
+                let shards = node_server_state
+                    .shard_store
+                    .iter_shards()
+                    .map(|digest| hex::encode(&digest))
+                    .collect()
+                    .await;
+                if let Err(e) = coord_api_client
+                    .register_node(
+                        &node_server_state.node_id,
+                        &node_server_state.public_url,
+                        shards,
+                    )
+                    .await
+                {
+                    log::error!("Node registration failed: {:?}", e);
+                    std::process::exit(1);
+                }
+            })
+        }))
 }

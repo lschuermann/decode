@@ -468,6 +468,32 @@ impl<const N: usize> ShardStore<N> {
         // Close the file by dropping it. Flush not required, given it was
         // opened read-only.
     }
+
+    pub fn iter_shards(&self) -> impl futures::stream::Stream<Item = [u8; N]> + '_ {
+        use futures::stream::StreamExt;
+
+        async_walkdir::WalkDir::new(&self.base_path)
+            .map(|entry_res| entry_res.unwrap().path())
+            .filter(|entry_path| {
+                let prefix_free_entry_path = entry_path.strip_prefix(&self.base_path).unwrap();
+                futures::future::ready(
+                    !prefix_free_entry_path.starts_with("lock")
+                        && !prefix_free_entry_path.starts_with("temp"),
+                )
+            })
+            .filter(|entry_path| {
+                futures::future::ready(entry_path.file_name().unwrap().len() == N * 2)
+            })
+            .map(|entry_path| {
+                let mut digest = [0_u8; N];
+                hex::decode_to_slice(
+                    OsStrExt::as_bytes(entry_path.file_name().unwrap()),
+                    &mut digest,
+                )
+                .unwrap();
+                digest
+            })
+    }
 }
 
 impl<const N: usize> Drop for ShardStore<N> {

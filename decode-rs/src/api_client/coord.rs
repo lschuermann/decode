@@ -61,6 +61,33 @@ impl CoordAPIUploadError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum CoordAPIRegisterError {
+    /// Miscellaneous client error not specific to this request type:
+    MiscError(CoordAPIClientError),
+}
+
+impl CoordAPIRegisterError {
+    fn from_reqwest_error(err: reqwest::Error) -> CoordAPIRegisterError {
+        // Handle the generic reqwest error cases first:
+        match CoordAPIClientError::from_reqwest_generic_err(err) {
+            Ok(generic_err) => CoordAPIRegisterError::MiscError(generic_err),
+            Err(_err) => {
+                // There should be no upload-specific cases which can
+                // cause a [reqwest::Error] to occur. Hence return a
+                // miscellaneous Unknown error:
+                CoordAPIRegisterError::MiscError(CoordAPIClientError::Unknown)
+            }
+        }
+    }
+
+    fn from_api_error<'desc, 'resp_body>(
+        apierr: coord_api::APIError<'desc, 'resp_body>,
+    ) -> CoordAPIRegisterError {
+        CoordAPIRegisterError::MiscError(CoordAPIClientError::APIError(apierr.into_owned()))
+    }
+}
+
 pub struct CoordAPIClient {
     http_client: reqwest::Client,
     base_url: reqwest::Url,
@@ -71,6 +98,45 @@ impl CoordAPIClient {
         CoordAPIClient {
             http_client: reqwest::Client::new(),
             base_url,
+        }
+    }
+
+    pub async fn register_node<'a>(
+        &self,
+        node_id: &uuid::Uuid,
+        node_url: &reqwest::Url,
+        shard_digests: Vec<String>,
+    ) -> Result<(), CoordAPIRegisterError> {
+        let request_body = coord_api::NodeRegisterRequest {
+            node_url: node_url.to_string(),
+            shards: shard_digests,
+        };
+
+        let resp = self
+            .http_client
+            .put(
+                self.base_url
+                    .join("/v0/node/")
+                    .and_then(|url| url.join(&node_id.to_string()))
+                    .expect("Failed to construct node register URL"),
+            )
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(CoordAPIRegisterError::from_reqwest_error)?;
+
+        let status = NonZeroU16::new(resp.status().as_u16()).unwrap();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(CoordAPIRegisterError::from_reqwest_error)?;
+        let parsed = coord_api::NodeRegisterResponse::from_http_resp(status, bytes.as_ref());
+
+        match parsed {
+            coord_api::NodeRegisterResponse::Success => Ok(()),
+            coord_api::NodeRegisterResponse::APIError(api_err) => {
+                Err(CoordAPIRegisterError::from_api_error(api_err))
+            }
         }
     }
 

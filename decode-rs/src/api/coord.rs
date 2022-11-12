@@ -315,3 +315,86 @@ impl<'desc, 'resp_body> ObjectCreateResponse<'desc, 'resp_body> {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeRegisterRequest {
+    /// Base URL of the node attempting to register
+    pub node_url: String,
+
+    /// List of shard digests held at this node
+    pub shards: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum NodeRegisterResponse<'desc, 'resp_body> {
+    /// Object create request was successfull, the client is provided
+    /// with an object upload map.
+    Success,
+    /// An error was returned in response to the object create
+    /// request. The error has been deserialized into the
+    /// corresponding field.
+    APIError(APIError<'desc, 'resp_body>),
+}
+
+impl<'desc, 'resp_body> NodeRegisterResponse<'desc, 'resp_body> {
+    pub fn from_bytes<'a: 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
+        // Success (200) response should have an empty payload:
+        if bytes.len() == 0 {
+            NodeRegisterResponse::Success
+        } else {
+            // Try to parse as an error response, fall back to InvalidResponse
+            // otherwise:
+            serde_json::from_slice::<'a, APIError<'a, 'a>>(bytes)
+                .map(NodeRegisterResponse::APIError)
+                .unwrap_or_else(|_| {
+                    NodeRegisterResponse::APIError(APIError::InvalidResponse {
+                        status: None,
+                        resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                    })
+                })
+        }
+    }
+
+    pub fn from_http_resp<'a: 'desc + 'resp_body>(status: NonZeroU16, bytes: &'a [u8]) -> Self {
+        // Use the regular `from_bytes` to parse:
+        let mut parsed = Self::from_bytes(bytes);
+
+        // When we've gotten a parsed success and/or error, check that
+        // the expected HTTP response code matches the passed one. If
+        // not, return an [`APIError::InvalidResponse`].
+        let expected_status = match parsed {
+            NodeRegisterResponse::Success => Some(NonZeroU16::new(200).unwrap()),
+            NodeRegisterResponse::APIError(ref err) => err.http_status_code(),
+        };
+
+        if let Some(expected_status_code) = expected_status {
+            if expected_status_code != status {
+                NodeRegisterResponse::APIError(APIError::InvalidResponse {
+                    status: Some(status),
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            } else {
+                // Parsing worked, code matches
+                parsed
+            }
+        } else {
+            // Parsing did not yield a success variant OR an error
+            // with an expected status, pass the parsed result (which
+            // likely is a [`APIError::InvalidResponse`])
+            // through and set the actual received status:
+            if let NodeRegisterResponse::APIError(ref mut api_err) = &mut parsed {
+                api_err.set_invalid_response_status_code(status);
+            }
+            parsed
+        }
+    }
+
+    pub fn into_owned(self) -> NodeRegisterResponse<'static, 'static> {
+        match self {
+            NodeRegisterResponse::Success => NodeRegisterResponse::Success,
+            NodeRegisterResponse::APIError(api_error) => {
+                NodeRegisterResponse::APIError(api_error.into_owned())
+            }
+        }
+    }
+}
