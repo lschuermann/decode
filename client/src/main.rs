@@ -319,7 +319,7 @@ async fn upload_chunk(
     object_file: &mut async_fs::File,
     upload_map: &coord_api::ObjectUploadMap,
     chunk_idx: usize,
-) -> Result<(), exitcode::ExitCode> {
+) -> Result<Vec<node_api::ShardUploadReceipt<'static, 'static>>, exitcode::ExitCode> {
     let chunk_offset = upload_map.chunk_size * chunk_idx as u64;
     let chunk_size = std::cmp::min(
         upload_map.chunk_size as usize,
@@ -458,9 +458,9 @@ async fn upload_chunk(
     );
 
     // Now, execute both:
-    let ((), _receipts) = futures::try_join!(encode_fut, upload_fut)?;
+    let ((), receipts) = futures::try_join!(encode_fut, upload_fut)?;
 
-    Ok(())
+    Ok(receipts)
 }
 
 async fn upload_command(cli: &Cli, cmd: &UploadCommand) -> Result<(), exitcode::ExitCode> {
@@ -614,17 +614,33 @@ async fn upload_command(cli: &Cli, cmd: &UploadCommand) -> Result<(), exitcode::
 
     let node_api_client = NodeAPIClient::new();
 
+    let mut upload_receipts: Vec<Vec<node_api::ShardUploadReceipt>> =
+        Vec::with_capacity(upload_map.shard_map.len());
     for chunk_idx in 0..upload_map.shard_map.len() {
-        upload_chunk(
-            cli,
-            &node_api_client,
-            &mut async_reed_solomon,
-            &mut object_file,
-            &upload_map,
-            chunk_idx,
-        )
-        .await?;
+        upload_receipts.push(
+            upload_chunk(
+                cli,
+                &node_api_client,
+                &mut async_reed_solomon,
+                &mut object_file,
+                &upload_map,
+                chunk_idx,
+            )
+            .await?,
+        );
     }
+
+    coord_api_client
+        .finalize_object(upload_map, upload_receipts)
+        .await
+        .map_err(|e| {
+            log::error!(
+                "An error occurred while finalizing the object upload: {:?}",
+                e
+            );
+            MISC_ERR
+        })?;
+
     Ok(())
 }
 

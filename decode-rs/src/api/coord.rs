@@ -6,6 +6,8 @@ use serde_json::{Map, Value};
 
 use uuid::Uuid;
 
+use super::node as node_api;
+
 #[derive(Clone)]
 pub struct ResponseBody<'a>(pub Cow<'a, [u8]>);
 impl std::fmt::Debug for ResponseBody<'_> {
@@ -311,6 +313,89 @@ impl<'desc, 'resp_body> ObjectCreateResponse<'desc, 'resp_body> {
             }
             ObjectCreateResponse::APIError(api_error) => {
                 ObjectCreateResponse::APIError(api_error.into_owned())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ObjectFinalizeRequest<'digest, 'receipt> {
+    /// The upload map originally returned by the coordinator for this request
+    pub object_upload_map: ObjectUploadMap,
+
+    /// The collection of receipts returned by the node
+    pub upload_results: Vec<Vec<node_api::ShardUploadReceipt<'digest, 'receipt>>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ObjectFinalizeResponse<'desc, 'resp_body> {
+    /// Object create request was successfull, the client is provided
+    /// with an object upload map.
+    Success,
+    /// An error was returned in response to the object create
+    /// request. The error has been deserialized into the
+    /// corresponding field.
+    APIError(APIError<'desc, 'resp_body>),
+}
+
+impl<'desc, 'resp_body> ObjectFinalizeResponse<'desc, 'resp_body> {
+    pub fn from_bytes<'a: 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
+        // Success (200) response should have an empty payload:
+        if bytes.len() == 0 {
+            ObjectFinalizeResponse::Success
+        } else {
+            // Try to parse as an error response, fall back to InvalidResponse
+            // otherwise:
+            serde_json::from_slice::<'a, APIError<'a, 'a>>(bytes)
+                .map(ObjectFinalizeResponse::APIError)
+                .unwrap_or_else(|_| {
+                    ObjectFinalizeResponse::APIError(APIError::InvalidResponse {
+                        status: None,
+                        resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                    })
+                })
+        }
+    }
+
+    pub fn from_http_resp<'a: 'desc + 'resp_body>(status: NonZeroU16, bytes: &'a [u8]) -> Self {
+        // Use the regular `from_bytes` to parse:
+        let mut parsed = Self::from_bytes(bytes);
+
+        // When we've gotten a parsed success and/or error, check that
+        // the expected HTTP response code matches the passed one. If
+        // not, return an [`APIError::InvalidResponse`].
+        let expected_status = match parsed {
+            ObjectFinalizeResponse::Success => Some(NonZeroU16::new(200).unwrap()),
+            ObjectFinalizeResponse::APIError(ref err) => err.http_status_code(),
+        };
+
+        if let Some(expected_status_code) = expected_status {
+            if expected_status_code != status {
+                ObjectFinalizeResponse::APIError(APIError::InvalidResponse {
+                    status: Some(status),
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            } else {
+                // Parsing worked, code matches
+                parsed
+            }
+        } else {
+            // Parsing did not yield a success variant OR an error
+            // with an expected status, pass the parsed result (which
+            // likely is a [`APIError::InvalidResponse`])
+            // through and set the actual received status:
+            if let ObjectFinalizeResponse::APIError(ref mut api_err) = &mut parsed {
+                api_err.set_invalid_response_status_code(status);
+            }
+            parsed
+        }
+    }
+
+    pub fn into_owned(self) -> ObjectFinalizeResponse<'static, 'static> {
+        match self {
+            ObjectFinalizeResponse::Success => ObjectFinalizeResponse::Success,
+            ObjectFinalizeResponse::APIError(api_error) => {
+                ObjectFinalizeResponse::APIError(api_error.into_owned())
             }
         }
     }

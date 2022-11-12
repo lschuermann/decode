@@ -3,6 +3,7 @@ use std::num::NonZeroU16;
 use reqwest;
 
 use crate::api::coord as coord_api;
+use crate::api::node as node_api;
 
 #[derive(Debug, Clone)]
 pub enum CoordAPIClientError {
@@ -58,6 +59,33 @@ impl CoordAPIUploadError {
         apierr: coord_api::APIError<'desc, 'resp_body>,
     ) -> CoordAPIUploadError {
         CoordAPIUploadError::MiscError(CoordAPIClientError::APIError(apierr.into_owned()))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum CoordAPIObjectFinalizeError {
+    /// Miscellaneous client error not specific to this request type:
+    MiscError(CoordAPIClientError),
+}
+
+impl CoordAPIObjectFinalizeError {
+    fn from_reqwest_error(err: reqwest::Error) -> CoordAPIObjectFinalizeError {
+        // Handle the generic reqwest error cases first:
+        match CoordAPIClientError::from_reqwest_generic_err(err) {
+            Ok(generic_err) => CoordAPIObjectFinalizeError::MiscError(generic_err),
+            Err(_err) => {
+                // There should be no finalize-specific cases which can
+                // cause a [reqwest::Error] to occur. Hence return a
+                // miscellaneous Unknown error:
+                CoordAPIObjectFinalizeError::MiscError(CoordAPIClientError::Unknown)
+            }
+        }
+    }
+
+    fn from_api_error<'desc, 'resp_body>(
+        apierr: coord_api::APIError<'desc, 'resp_body>,
+    ) -> CoordAPIObjectFinalizeError {
+        CoordAPIObjectFinalizeError::MiscError(CoordAPIClientError::APIError(apierr.into_owned()))
     }
 }
 
@@ -175,8 +203,47 @@ impl CoordAPIClient {
         }
     }
 
-    pub async fn finalize_object(
-	&self,
-	upload_map: &coord_api::ObjectUploadMap,
-	
+    pub async fn finalize_object<'digest, 'receipt>(
+        &self,
+        object_upload_map: coord_api::ObjectUploadMap,
+        upload_results: Vec<Vec<node_api::ShardUploadReceipt<'digest, 'receipt>>>,
+    ) -> Result<(), CoordAPIObjectFinalizeError> {
+        let request_body = coord_api::ObjectFinalizeRequest {
+            object_upload_map,
+            upload_results,
+        };
+
+        let resp = self
+            .http_client
+            .put(
+                self.base_url
+                    .join("/v0/object/")
+                    .and_then(|url| {
+                        url.join(&format!(
+                            "{}/",
+                            request_body.object_upload_map.object_id.to_string()
+                        ))
+                    })
+                    .and_then(|url| url.join("finalize"))
+                    .expect("Failed to construct object finalize URL"),
+            )
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(CoordAPIObjectFinalizeError::from_reqwest_error)?;
+
+        let status = NonZeroU16::new(resp.status().as_u16()).unwrap();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(CoordAPIObjectFinalizeError::from_reqwest_error)?;
+        let parsed = coord_api::ObjectFinalizeResponse::from_http_resp(status, bytes.as_ref());
+
+        match parsed {
+            coord_api::ObjectFinalizeResponse::Success => Ok(()),
+            coord_api::ObjectFinalizeResponse::APIError(api_err) => {
+                Err(CoordAPIObjectFinalizeError::from_api_error(api_err))
+            }
+        }
+    }
 }
