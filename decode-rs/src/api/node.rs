@@ -183,9 +183,6 @@ pub struct ShardUploadReceipt<'digest, 'receipt> {
     #[serde(borrow)]
     pub digest: Cow<'digest, str>,
 
-    /// Shard size in bytes
-    pub size: u64,
-
     /// Opaque (digitally signed) receipt to confirm that this shard
     /// has been uploaded to the node.
     pub receipt: Cow<'receipt, str>,
@@ -195,7 +192,6 @@ impl ShardUploadReceipt<'_, '_> {
     pub fn into_owned(self) -> ShardUploadReceipt<'static, 'static> {
         ShardUploadReceipt {
             digest: Cow::Owned(self.digest.into_owned()),
-            size: self.size,
             receipt: Cow::Owned(self.receipt.into_owned()),
         }
     }

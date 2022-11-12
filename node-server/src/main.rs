@@ -184,8 +184,6 @@ async fn post_shard(
 
         Ok(Json(node_api::ShardUploadReceipt {
             digest: Cow::Owned(hex::encode(&digest)),
-            // TODO: return proper size!
-            size: 0,
             // TODO: generate an actual receipt
             receipt: Cow::Borrowed("dummy_receipt"),
         }))

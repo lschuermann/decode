@@ -78,16 +78,11 @@ components:
       type: object
       required:
         - digest
-        - size
         - receipt
       properties:
         digest:
           type: string
           description: Hex-encoded SHA3-256 digest of shard data
-        size:
-          type: integer
-          format: int64
-          description: "Size of the shard in bytes"
         receipt:
           type: string
           description: |

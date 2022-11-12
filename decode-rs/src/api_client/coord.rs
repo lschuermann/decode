@@ -174,4 +174,9 @@ impl CoordAPIClient {
             }
         }
     }
+
+    pub async fn finalize_object(
+	&self,
+	upload_map: &coord_api::ObjectUploadMap,
+	
 }
