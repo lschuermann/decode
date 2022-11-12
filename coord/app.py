@@ -46,14 +46,14 @@ class ShardNodeMap:
         if node_id not in self.nodemap:
             return
 
-        for shard in self.nodemap[node_id]:
+        for shard in self.nodemap[node_id].shards:
             self.shard_to_nodes[shard].remove(node_id)
 
         self.nodemap[node_id].timer.cancel()
         del self.nodemap[node_id]
 
     def add_shard(self, node_id, shard):
-        self.nodemap[node_id].add(shard)
+        self.nodemap[node_id].shards.add(shard)
 
         if not shard in self.shard_to_nodes:
             self.shard_to_nodes[shard] = set()
@@ -63,10 +63,10 @@ class ShardNodeMap:
         # when node_id is None, delete shard on all nodes
         if node_id is None:
             for node in self.shard_to_nodes[shard]:
-                self.nodemap[node].remove(shard)
+                self.nodemap[node].shards.remove(shard)
             del self.shard_to_nodes[shard]
         else:
-            self.nodemap[node_id].remove(shard)
+            self.nodemap[node_id].shards.remove(shard)
             self.shard_to_nodes[shard].remove(node_id)
     
     def get_shard_nodes(self, shard):
@@ -75,7 +75,7 @@ class ShardNodeMap:
 
     def get_node_shards(self, node_id):
         # Return a set of shards
-        return self.nodemap[node_id]
+        return self.nodemap[node_id].shards
 
 shard_node_map = ShardNodeMap()
 
@@ -88,27 +88,32 @@ class NodeStatus:
         self.bandwidth = None
         self.cpu_usage = None
         self.report_miss = 0
-        self.timer = threading.Timer(liveness_report_period, self.liveness_request)
-        self.timer.start()
+        self.liveness_request()
 
     # Periodic liveness check request
     def liveness_request(self):
         try:
-            response = requests.post(self.url + "/stats", timeout=stats_timeout)
+            response = requests.get(self.url + "/v0/stats", timeout=stats_timeout)
         except requests.Timeout:
             # back off and retry
             self.report_miss += 1
             # Node is down
-            if self.report_miss == 3:
+            if self.report_miss == report_miss_before_down:
                 self.timer.cancel()
                 # remove node from map
             pass
         except requests.ConnectionError:
+            # TODO: return error
             pass
-        finally:
-            self.bandwidth = response['bandwidth']
-            self.cpu_usage = response['cpu_usage']
-            self.disk_usage = response['disk_usage']
+
+        stats = response.json()
+        self.bandwidth = stats['bandwidth']
+        self.cpu_usage = stats['cpu_usage']
+        self.disk_usage = stats['disk_usage']
+        print('stats: ', self.bandwidth, self.cpu_usage, self.disk_usage)
+        self.timer = threading.Timer(liveness_report_period, self.liveness_request)
+        self.timer.start()
+
 
 def place_shards(number_shards, excluded_nodes, shard_size):
     nodes = []
@@ -122,8 +127,8 @@ def place_shards(number_shards, excluded_nodes, shard_size):
 def place_shard(excluded_nodes, shard_size):
     while(1):
         item = shard_node_map.random_item()
-        if item.key not in excluded_nodes and item.value.disk_usage > shard_size:
-            return item.key, item.value.url
+        # if item.key not in excluded_nodes and item.value.disk_usage > shard_size:
+        return item.key, item.value.url
     
 
 @app.route("/")
