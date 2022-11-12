@@ -111,75 +111,25 @@ paths:
               type: object
               required:
                 - node_id
+                - node_url
                 - shards
-                - report
               properties:
                 node_id:
                   type: string
                   description: UUID of node
+                node_url:
+                  type: string
+                  description: URL of node
                 shards:
                   type: array
                   items:
                     type: string
                     description: Sha3-256 digest of shard
-                report:
-                  type: object
-                  required: 
-                    - disk_usage
-                    - bandwidth
-                    - cpu_usage
-                  properties:
-                    disk_usage:
-                      type: integer
-                      description: disk usage in percentage
-                    bandwidth:
-                      type: integer
-                      description: bandwidth usage in percentage
-                    cpu_usage:
-                      type: integer
-                      description: cpu usage in percentage
                   
                     
       responses:
         '200':
           description: Node register successfully
-
-  # /v0/object/{objectId}/finalize:
-  /v0/node/{nodeId}/report:
-    post:
-      summary: Report node status periodically
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: nodeId
-          in: path
-          required: true
-          description: node id
-          schema:
-            type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required: 
-                - disk_usage
-                - bandwidth
-                - cpu_usage
-              properties:
-                disk_usage:
-                  type: integer
-                  description: disk usage in percentage
-                bandwidth:
-                  type: integer
-                  description: bandwidth usage in percentage
-                cpu_usage:
-                  type: integer
-                  description: cpu usage in percentage
-      responses:
-        '200':
-          description: Node report successfully
-                  
                   
 components:
   schemas:
@@ -343,4 +293,3 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      
