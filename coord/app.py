@@ -36,7 +36,7 @@ class ShardNodeMap:
         self.nodemap = RandomDict()
     
     def add_node(self, node_id, node_url, shards):     
-        self.nodemap[node_id] = NodeStatus(node_url, shards)
+        self.nodemap[node_id] = NodeStatus(node_url, node_id, shards)
 
         for shard in shards:
             if not shard in self.shard_to_nodes:
@@ -82,7 +82,8 @@ shard_node_map = ShardNodeMap()
 
 
 class NodeStatus:
-    def __init__(self, url, shards):
+    def __init__(self, url, node_id, shards):
+        self.node_id = node_id
         self.url = url
         self.shards = shards
         self.disk_usage = None
@@ -101,6 +102,8 @@ class NodeStatus:
             # Node is down
             if self.report_miss == report_miss_before_down:
                 self.timer.cancel()
+                down_node_handling(self.shards)
+                del shard_node_map.nodemap[self.node_id]
                 # remove node from map
             pass
         except requests.ConnectionError:
@@ -114,6 +117,29 @@ class NodeStatus:
         print('stats: ', self.bandwidth, self.cpu_usage, self.disk_usage)
         self.timer = threading.Timer(liveness_report_period, self.liveness_request)
         self.timer.start()
+
+def down_node_handling(shards):
+    for shard in shards:
+        excluded_nodes = []
+        object_chunk_query = db.session.query(Shard).filter_by(shard_hash = shard)
+        object_id = object_chunk_query[0].object_id
+        chunk_index = object_chunk_query[0].chunk_index
+        object_query = db.session.query(Object).filter_by(id = object_id)
+        shards_query = db.session.query(Shard).filter_by(object_id=object_id, chunk_index=chunk_index)
+        construct_shard_map = []
+        for shard_query in shards_query:
+            if shard_query.shard_hash == shard:
+                construct_shard_map.append({None})
+                continue
+            stored_node = shard_node_map.get_shard_nodes(shard_query.shard_hash)
+            construct_shard_map.append({
+                'digest': shard_query.shard_hash,
+                'nodes': stored_node,
+                'ticket': 'TICKET'})
+            excluded_nodes += stored_node
+        # The node this reconstruction should take place
+        node = place_shards(1, excluded_nodes, object_query[0].shard_size)[0] 
+        # send the reconstruction request
 
 
 def place_shards(number_shards, excluded_nodes, shard_size):
@@ -226,21 +252,16 @@ def finalize_object(objectID):
     )
     db.session.add(object)
 
-    # "upload_results" lists shards in order. e.g., 
-    # (chunk0, shard0), (chunk0, shard1), (chunk1, shard0), (chunk1, shard1)
+    # "upload_results" lists shards in order 
     upload_results= body["upload_results"]
-    prev_chunk_index = None 
-    for i in upload_results:
-        chunk_index = int(i["chunk_index"])
-        if prev_chunk_index == None or prev_chunk_index != chunk_index:
-            prev_chunk_index = chunk_index
-            chunk = Chunk(objectID, chunk_index)
-            db.session.add(chunk)
-        shard_index = int(i["shard_index"])
-        digest = i["digest"].encode()
-        # receipt = i["receipt"] # Ideally should check the vadility of the receipt
-        shard = Shard(objectID, chunk_index, shard_index, digest)
-        db.session.add(shard)
+    for chunk_index, chunk in enumerate(upload_results):
+        chunk = Chunk(objectID, chunk_index)
+        db.session.add(chunk)
+        for shard_index, shard in enumerate(chunk):
+            digest = shard["digest"].encode()
+            # receipt = i["receipt"] # Ideally should check the vadility of the receipt
+            shard = Shard(objectID, chunk_index, shard_index, digest)
+            db.session.add(shard)
 
     db.session.commit()
     return make_response("", status.HTTP_200_OK)
@@ -280,5 +301,4 @@ def retrieve_object(objectID):
             "code_ratio_parity": object[0].code_ratio_parity,
             "shard_map": all_chunks,
             "node_map": node_map
-        
     }    
