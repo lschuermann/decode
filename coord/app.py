@@ -254,14 +254,14 @@ def finalize_object(objectID):
 
     # "upload_results" lists shards in order 
     upload_results= body["upload_results"]
-    for chunk_index, chunk in enumerate(upload_results):
-        chunk = Chunk(objectID, chunk_index)
-        db.session.add(chunk)
-        for shard_index, shard in enumerate(chunk):
-            digest = shard["digest"].encode()
+    for chunk_index, res_chunk in enumerate(upload_results):
+        chunk_row = Chunk(objectID, chunk_index)
+        db.session.add(chunk_row)
+        for shard_index, res_shard in enumerate(res_chunk):
+            digest = bytes(bytearray.fromhex(res_shard["digest"]))
             # receipt = i["receipt"] # Ideally should check the vadility of the receipt
-            shard = Shard(objectID, chunk_index, shard_index, digest)
-            db.session.add(shard)
+            shard_row = Shard(objectID, chunk_index, shard_index, digest)
+            db.session.add(shard_row)
 
     db.session.commit()
     return make_response("", status.HTTP_200_OK)
