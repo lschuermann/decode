@@ -80,7 +80,7 @@ impl NodeAPIClient {
         base_url: impl Borrow<reqwest::Url>,
         ticket: impl AsRef<str>,
         reader: impl AsyncRead + AsyncReadExt + Unpin + Send + Sync + 'static,
-    ) -> Result<(), NodeAPIUploadError> {
+    ) -> Result<node_api::ShardUploadReceipt<'static, 'static>, NodeAPIUploadError> {
         // Create a [`Body`] object which wraps a [`Stream`], which in
         // turn is generated from the [`AsyncRead`] passed in:
         let body = reqwest::Body::wrap_stream(tokio_util::codec::FramedRead::new(
@@ -114,7 +114,7 @@ impl NodeAPIClient {
         let parsed = node_api::ShardUploadResponse::from_http_resp(status, bytes.as_ref());
 
         match parsed {
-            node_api::ShardUploadResponse::Success(_) => Ok(()),
+            node_api::ShardUploadResponse::Success(receipt) => Ok(receipt.into_owned()),
             node_api::ShardUploadResponse::APIError(api_err) => {
                 Err(NodeAPIUploadError::from_api_error(api_err))
             }

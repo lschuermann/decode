@@ -12,8 +12,9 @@ use tokio::fs as async_fs;
 use tokio::io::{self as async_io, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use decode_rs::api::coord as coord_api;
+use decode_rs::api::node as node_api;
 use decode_rs::api_client::coord::CoordAPIClient;
-use decode_rs::api_client::node::NodeAPIClient;
+use decode_rs::api_client::node::{NodeAPIClient, NodeAPIUploadError};
 use decode_rs::api_client::reqwest::Url;
 
 use reed_solomon_erasure::{galois_8::Field as Galois8Field, Error as RSError, ReedSolomon};
@@ -360,7 +361,7 @@ async fn upload_chunk(
         chunk_idx: usize,
         encoded_readers: Vec<async_io::DuplexStream>,
         shard_specs: &[coord_api::ObjectUploadShardSpec],
-    ) -> Result<(), exitcode::ExitCode> {
+    ) -> Result<Vec<node_api::ShardUploadReceipt<'static, 'static>>, exitcode::ExitCode> {
         assert!(encoded_readers.len() == shard_specs.len());
 
         // Spawn the clients, one for every reader:
@@ -384,15 +385,15 @@ async fn upload_chunk(
             .collect();
 
         // Finally, collectively await the requests:
-        let upload_results: Vec<Result<(), decode_rs::api_client::node::NodeAPIUploadError>> =
-            futures::future::join_all(upload_requests.into_iter()).await;
+        let upload_results: Vec<
+            Result<node_api::ShardUploadReceipt<'static, 'static>, NodeAPIUploadError>,
+        > = futures::future::join_all(upload_requests.into_iter()).await;
 
         // Iterate over the write results, reporting the first error we can find:
-        if let (shard_idx, Err(e)) = upload_results
+        if let Some((shard_idx, Err(e))) = upload_results
             .iter()
             .enumerate()
             .find(|(_, res)| res.is_err())
-            .unwrap_or((0, &Ok(())))
         {
             log::error!(
                 "Error while uploading shard {} of chunk {}: {:?}",
@@ -403,7 +404,7 @@ async fn upload_chunk(
             return Err(MISC_ERR);
         }
 
-        Ok(())
+        Ok(upload_results.into_iter().map(|res| res.unwrap()).collect())
     }
 
     async fn encode_shards(
@@ -457,7 +458,7 @@ async fn upload_chunk(
     );
 
     // Now, execute both:
-    futures::try_join!(encode_fut, upload_fut)?;
+    let ((), _receipts) = futures::try_join!(encode_fut, upload_fut)?;
 
     Ok(())
 }

@@ -36,7 +36,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ShardInfo"
+                $ref: "#/components/schemas/ShardUploadReceipt"
 
   /shard/{shardDigest}:
     get:
@@ -64,16 +64,35 @@ components:
     ShardInfo:
       type: object
       required:
-        - sha3_256
+        - digest
         - size
       properties:
-        sha3_256:
+        digest:
           type: string
           description: Hex-encoded SHA3-256 digest of shard data
         size:
           type: integer
           format: int64
           description: "Size of the shard in bytes"
+    ShardUploadReceipt:
+      type: object
+      required:
+        - digest
+        - size
+        - receipt
+      properties:
+        digest:
+          type: string
+          description: Hex-encoded SHA3-256 digest of shard data
+        size:
+          type: integer
+          format: int64
+          description: "Size of the shard in bytes"
+        receipt:
+          type: string
+          description: |
+            Opaque (digitally signed) receipt to confirm that this shard has
+            been uploaded to the node.
   securitySchemes:
     bearerAuth:
       type: http

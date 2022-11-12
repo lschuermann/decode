@@ -177,11 +177,35 @@ impl ShardInfo<'_> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardUploadReceipt<'digest, 'receipt> {
+    /// Hex-encoded SHA3-256 digest of the uploaded shard
+    #[serde(borrow)]
+    pub digest: Cow<'digest, str>,
+
+    /// Shard size in bytes
+    pub size: u64,
+
+    /// Opaque (digitally signed) receipt to confirm that this shard
+    /// has been uploaded to the node.
+    pub receipt: Cow<'receipt, str>,
+}
+
+impl ShardUploadReceipt<'_, '_> {
+    pub fn into_owned(self) -> ShardUploadReceipt<'static, 'static> {
+        ShardUploadReceipt {
+            digest: Cow::Owned(self.digest.into_owned()),
+            size: self.size,
+            receipt: Cow::Owned(self.receipt.into_owned()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub enum ShardUploadResponse<'digest, 'desc, 'resp_body> {
+pub enum ShardUploadResponse<'digest, 'receipt, 'desc, 'resp_body> {
     /// The shard was uploaded successfully, we are returned some
     /// metadata.
-    Success(ShardInfo<'digest>),
+    Success(ShardUploadReceipt<'digest, 'receipt>),
 
     /// An error was returned in response to the shard upload
     /// request. The error has been deserialized into the
@@ -189,10 +213,12 @@ pub enum ShardUploadResponse<'digest, 'desc, 'resp_body> {
     APIError(APIError<'desc, 'resp_body>),
 }
 
-impl<'digest, 'desc, 'resp_body> ShardUploadResponse<'digest, 'desc, 'resp_body> {
-    pub fn from_bytes<'a: 'digest + 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
+impl<'digest, 'receipt, 'desc, 'resp_body>
+    ShardUploadResponse<'digest, 'receipt, 'desc, 'resp_body>
+{
+    pub fn from_bytes<'a: 'digest + 'receipt + 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
         // Try to parse as success type first:
-        serde_json::from_slice::<'a, ShardInfo>(bytes)
+        serde_json::from_slice::<'a, ShardUploadReceipt>(bytes)
             .map(ShardUploadResponse::Success)
             .or_else(|_| {
                 serde_json::from_slice::<'a, APIError<'a, 'a>>(bytes)
@@ -206,7 +232,7 @@ impl<'digest, 'desc, 'resp_body> ShardUploadResponse<'digest, 'desc, 'resp_body>
             })
     }
 
-    pub fn from_http_resp<'a: 'digest + 'desc + 'resp_body>(
+    pub fn from_http_resp<'a: 'digest + 'receipt + 'desc + 'resp_body>(
         status: NonZeroU16,
         bytes: &'a [u8],
     ) -> Self {
@@ -243,7 +269,7 @@ impl<'digest, 'desc, 'resp_body> ShardUploadResponse<'digest, 'desc, 'resp_body>
         }
     }
 
-    pub fn into_owned(self) -> ShardUploadResponse<'static, 'static, 'static> {
+    pub fn into_owned(self) -> ShardUploadResponse<'static, 'static, 'static, 'static> {
         match self {
             ShardUploadResponse::Success(object_upload_map) => {
                 ShardUploadResponse::Success(object_upload_map.into_owned())

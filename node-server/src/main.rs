@@ -106,7 +106,7 @@ async fn get_shard<'a>(
 async fn post_shard(
     data: Data<'_>,
     state: &State<NodeServerState>,
-) -> Result<Json<node_api::ShardInfo<'static>>, error::APIError> {
+) -> Result<Json<node_api::ShardUploadReceipt<'static, 'static>>, error::APIError> {
     use tokio::io::AsyncWriteExt;
 
     let mut insertion_shard = state
@@ -182,10 +182,12 @@ async fn post_shard(
             error::APIError::InternalServerError
         })?;
 
-        Ok(Json(node_api::ShardInfo {
+        Ok(Json(node_api::ShardUploadReceipt {
             digest: Cow::Owned(hex::encode(&digest)),
             // TODO: return proper size!
             size: 0,
+            // TODO: generate an actual receipt
+            receipt: Cow::Borrowed("dummy_receipt"),
         }))
     }
 }
