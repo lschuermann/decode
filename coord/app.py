@@ -6,7 +6,9 @@ from flask_api import status
 import toml
 import math
 import uuid
-
+import time, threading
+# from grequests import async
+import requests
 from database import db
 
 app = Flask(__name__)
@@ -24,16 +26,16 @@ parity_shards = config['erasure_code']['parity_shards']
 max_shard_size = config['shard_size']['max_shard_size']
 min_shard_size = config['shard_size']['min_shard_size']
 max_chunk_size = max_shard_size * max_data_shards
-
+liveness_report_period = config['liveness_check']['liveness_report_period']
+report_miss_before_down = config['liveness_check']['report_miss_before_down']
+stats_timeout = config['liveness_check']['stats_timeout']
 class ShardNodeMap:
     def __init__(self):
         self.shard_to_nodes = {}
-        self.node_to_shards = {}
+        self.nodemap = {}
     
-    def add_node(self, node_id, shards):
-        if type(shards) == list:
-            shards = set(shards)
-        self.node_to_shards[node_id] = shards
+    def add_node(self, node_id, node_url, shards):     
+        self.nodemap[node_id] = NodeStatus(node_url, shards)
 
         for shard in shards:
             if not shard in self.shard_to_nodes:
@@ -41,16 +43,17 @@ class ShardNodeMap:
             self.shard_to_nodes[shard].add(node_id)
     
     def remove_node(self, node_id):
-        if node_id not in self.node_to_shards:
+        if node_id not in self.nodemap:
             return
 
-        for shard in self.node_to_shards[node_id]:
+        for shard in self.nodemap[node_id]:
             self.shard_to_nodes[shard].remove(node_id)
 
-        del self.node_to_shards[node_id]
+        self.nodemap[node_id].timer.cancel()
+        del self.nodemap[node_id]
 
     def add_shard(self, node_id, shard):
-        self.node_to_shards[node_id].add(shard)
+        self.nodemap[node_id].add(shard)
 
         if not shard in self.shard_to_nodes:
             self.shard_to_nodes[shard] = set()
@@ -60,10 +63,10 @@ class ShardNodeMap:
         # when node_id is None, delete shard on all nodes
         if node_id is None:
             for node in self.shard_to_nodes[shard]:
-                self.node_to_shards[node].remove(shard)
+                self.nodemap[node].remove(shard)
             del self.shard_to_nodes[shard]
         else:
-            self.node_to_shards[node_id].remove(shard)
+            self.nodemap[node_id].remove(shard)
             self.shard_to_nodes[shard].remove(node_id)
     
     def get_shard_nodes(self, shard):
@@ -72,16 +75,56 @@ class ShardNodeMap:
 
     def get_node_shards(self, node_id):
         # Return a set of shards
-        return self.node_to_shards[node_id]
+        return self.nodemap[node_id]
 
 shard_node_map = ShardNodeMap()
 
-# Store the node index in NodeMap for shard digest
-# Used in ObjectRetrieval
-class DigestNodesMap:
-    def __init__(self, digest, nodemap_index):
-        self.digest = digest
-        self.nodemap_index = nodemap_index
+
+class NodeStatus:
+    def __init__(self, url, shards):
+        self.url = url
+        self.shards = shards
+        self.disk_usage = None
+        self.bandwidth = None
+        self.cpu_usage = None
+        self.report_miss = 0
+        self.timer = threading.Timer(liveness_report_period, self.liveness_request)
+        self.timer.start()
+
+    # Periodic liveness check request
+    def liveness_request(self):
+        try:
+            response = requests.post(self.url + "/stats", timeout=stats_timeout)
+        except requests.Timeout:
+            # back off and retry
+            self.report_miss += 1
+            # Node is down
+            if self.report_miss == 3:
+                self.timer.cancel()
+                # remove node from map
+            pass
+        except requests.ConnectionError:
+            pass
+        finally:
+            self.bandwidth = response['bandwidth']
+            self.cpu_usage = response['cpu_usage']
+            self.disk_usage = response['disk_usage']
+
+def place_shards(number_shards, excluded_nodes, shard_size):
+    nodes = []
+    for _ in range(number_shards + parity_shards):
+        node_id, node_url = place_shard(excluded_nodes, shard_size)
+        excluded_nodes.append(node_id)
+        nodes.append(node_url)
+    return nodes
+
+# Selection algorithm 
+def place_shard(excluded_nodes, shard_size):
+    while(1):
+        item = shard_node_map.random_item()
+        if item.key not in excluded_nodes and item.value.disk_usage > shard_size:
+            return item.key, item.value.url
+    
 
 @app.route("/")
 def hello():
@@ -107,26 +150,19 @@ def json_error():
 def ensure_json():
     return request.headers.get("Content-Type") == "application/json"
 
-@app.route("/v0/node", methods = ["POST"])
-def node_register():
+@app.route("/v0/node/<node_id>", methods = ["POST"])
+def node_register(node_id):
     if not ensure_json():
         return json_error()
     body = request.json
-    
-    if "node_id" not in body or type(body["node_id"]) != str:
-        return generic_error_response(
-            "malformed_request",
-            "Request body is missing \"node_id\" field or it is of an invalid type",
-            status.HTTP_400_BAD_REQUEST,
-        )
 
     # Verify other fields, e.g., list of shard hashes
 
-    node_id = body['node_id']
-    shards = set(body['shards'])
+    node_url = body['node_url']
     
+    shards = set([i.encode() for i in body['shards']])
     shard_node_map.remove_node(node_id)
-    shard_node_map.add_node(node_id, shards)
+    shard_node_map.add_node(node_id, node_url, shards)
 
     return make_response("", status.HTTP_200_OK)
 
@@ -142,14 +178,14 @@ def upload_object():
     size_shard = math.ceil(size_chunk / num_data_shards)
     shard_map = []
     uuid_file = uuid.uuid5(uuid.NAMESPACE_DNS, 'object.txt') #PLACEHOLDER for now
-    node_url = "Node_URL" #PLACEHOLDER for now
-    for i in range(num_chunck):
+    for _ in range(num_chunck):
         chunk = []
-        for j in range(num_data_shards):
+        nodes = place_shards(num_data_shards, [], size_shard) 
+        for node in nodes:
             chunk.append({
-                "ticket": "RANDOM_TICKET" ,
-                "node": node_url,
-            })
+                        "ticket": "RANDOM_TICKET" ,
+                        "node": node,
+                    })
         shard_map.append(chunk)
 
     return {
@@ -195,7 +231,7 @@ def finalize_object(objectID):
             chunk = Chunk(objectID, chunk_index)
             db.session.add(chunk)
         shard_index = int(i["shard_index"])
-        digest = bytearray.fromhex(i["digest"])
+        digest = i["digest"].encode()
         # receipt = i["receipt"] # Ideally should check the vadility of the receipt
         shard = Shard(objectID, chunk_index, shard_index, digest)
         db.session.add(shard)
@@ -226,17 +262,17 @@ def retrieve_object(objectID):
                 except:
                     node_map.append(node)
                     nodemap_index.append(len(node_map) - 1)                    
-            one_chunk.append(DigestNodesMap(digest, nodemap_index))
+            one_chunk.append({"digest": digest.decode(), "nodes": nodemap_index})
         all_chunks.append(one_chunk)
 
     return {
-        {
-            "object_size": object[0].object_size,
+        
+            "object_size": object[0].size,
             "chunk_size": object[0].chunk_size,
             "shard_size": object[0].shard_size,
             "code_ratio_data": object[0].code_ratio_data,
             "code_ratio_parity": object[0].code_ratio_parity,
             "shard_map": all_chunks,
             "node_map": node_map
-        }
+        
     }    
