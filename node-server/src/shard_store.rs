@@ -340,8 +340,12 @@ impl<const N: usize> ShardStore<N> {
         // Create a directory for temporary partial shards:
         let mut temp_shards_dir = self.base_path.clone();
         temp_shards_dir.push("temp");
-        // TODO: handle error for when directory already exists
-        async_fs::create_dir(&temp_shards_dir).await?;
+        async_fs::create_dir(&temp_shards_dir)
+            .await
+            .or_else(|ioerr| match ioerr.kind() {
+                IOErrorKind::AlreadyExists => Ok(()),
+                _ => Err(ioerr),
+            })?;
 
         // Loop until we found a suitable temporary file path:
         let mut temp_file = None;
