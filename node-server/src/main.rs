@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate rocket;
 
+use std::borrow::Cow;
 use std::io::ErrorKind as IOErrorKind;
 use std::path::PathBuf;
 
@@ -9,6 +10,7 @@ use rocket::fairing::AdHoc;
 use rocket::http::ContentType;
 use rocket::request::FromParam;
 use rocket::response::{self, Responder};
+use rocket::serde::json::Json;
 use rocket::{Data, State};
 use rocket::{Request, Response};
 
@@ -25,6 +27,8 @@ mod config;
 mod error;
 mod pipe_through_hasher;
 mod shard_store;
+
+use decode_rs::api::node as node_api;
 
 /// Parsed and validated node server configuration, along with other
 /// shared state and instances:
@@ -92,11 +96,16 @@ async fn get_shard<'a>(
     Ok(ShardResponse(shard))
 }
 
+// TODO: Handle error when upload is aborted!
+//
+// [2022-11-11][20:20:21][node_server][ERROR] Failed to write uploaded data to the pipe-through hasher writer: Custom { kind: Other, error: hyper::Error(Body, Custom { kind: UnexpectedEof, error: "unexpected EOF during chunk size line" }) }
+// [2022-11-11][20:20:21][node_server::shard_store][ERROR] An instance of InsertionShard instance must not be dropped.
+// [2022-11-11][20:20:21][_][WARN] Responding with registered (internal_server_error) /v0 500 catcher.
 #[post("/shard", data = "<data>")]
 async fn post_shard(
     data: Data<'_>,
     state: &State<NodeServerState>,
-) -> Result<String, error::APIError> {
+) -> Result<Json<node_api::ShardInfo<'static>>, error::APIError> {
     use tokio::io::AsyncWriteExt;
 
     let mut insertion_shard = state
@@ -172,7 +181,11 @@ async fn post_shard(
             error::APIError::InternalServerError
         })?;
 
-        Ok(format!("{:x?}", &digest))
+        Ok(Json(node_api::ShardInfo {
+            digest: Cow::Owned(hex::encode(&digest)),
+            // TODO: return proper size!
+            size: 0,
+        }))
     }
 }
 
