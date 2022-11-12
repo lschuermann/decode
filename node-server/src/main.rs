@@ -189,6 +189,15 @@ async fn post_shard(
     }
 }
 
+#[get("/stats")]
+async fn get_statistics() -> Json<node_api::NodeStatistics> {
+    Json(node_api::NodeStatistics {
+        bandwidth: 42,
+        cpu_usage: 0,
+        disk_usage: 9001, // over 9000
+    })
+}
+
 async fn initial_server_state(
     parsed_config: config::NodeServerConfigInterface,
 ) -> Result<NodeServerState, String> {
@@ -276,7 +285,7 @@ async fn rocket() -> _ {
         // that we return JSON errors here (although this is not
         // specified under any contract and entirely arbitrary)
         .register("/", error::get_catchers())
-        .mount("/v0/", routes![get_shard, post_shard])
+        .mount("/v0/", routes![get_shard, post_shard, get_statistics])
         .manage(node_server_state)
         .attach(AdHoc::config::<config::NodeServerConfigInterface>())
         .attach(AdHoc::on_liftoff("Node Registration Worker", |r| {

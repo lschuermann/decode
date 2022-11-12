@@ -254,3 +254,11 @@ impl<'digest, 'desc, 'resp_body> ShardUploadResponse<'digest, 'desc, 'resp_body>
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeStatistics {
+    // Dummy fields
+    pub bandwidth: u64,
+    pub cpu_usage: u64,
+    pub disk_usage: u64,
+}
