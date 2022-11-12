@@ -6,6 +6,81 @@ use serde_json::{Map, Value};
 
 use uuid::Uuid;
 
+#[derive(Clone)]
+pub struct ResponseBody<'a>(pub Cow<'a, [u8]>);
+impl std::fmt::Debug for ResponseBody<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_tuple("ResponseBody")
+            .field(&String::from_utf8_lossy(&self.0))
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub enum APIError<'desc, 'resp_body> {
+    /// An unexpected, internal server error
+    ///
+    /// An unexpected internal server error occurred. The inner
+    /// description may contain more information about the
+    /// error. Please submit a bug report when encountering this
+    /// error.
+    InternalServerError {
+        #[serde(borrow)]
+        description: Cow<'desc, str>,
+    },
+
+    /// We are unable to parse the response
+    #[serde(skip)]
+    InvalidResponse {
+        /// The HTTP error code provided by the coordinator
+        ///
+        /// The error code should never exceed a 3-digit stricly
+        /// positive integer. We wrap it into an Option<NonZeroU16>
+        /// nonetheless to capture the case whether the request has a
+        /// malformed error code.
+        status: Option<NonZeroU16>,
+
+        /// The HTTP response body represented as a byte slice
+        ///
+        /// This is not represented as a string as it might not be
+        /// valid UTF-8.
+        resp_body: Option<ResponseBody<'resp_body>>,
+    },
+}
+
+impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
+    pub fn http_status_code(&self) -> Option<NonZeroU16> {
+        match self {
+            // 500: Internal Server Error
+            APIError::InternalServerError { .. } => Some(NonZeroU16::new(500).unwrap()),
+
+            // InvalidResponse does not have an associated HTTP status code.
+            APIError::InvalidResponse { .. } => None,
+        }
+    }
+
+    pub fn set_invalid_response_status_code(&mut self, new_status: NonZeroU16) {
+        if let APIError::InvalidResponse { ref mut status, .. } = self {
+            *status = Some(new_status);
+        }
+    }
+
+    pub fn into_owned(self) -> APIError<'static, 'static> {
+        match self {
+            APIError::InternalServerError { description } => APIError::InternalServerError {
+                description: Cow::Owned(description.into_owned()),
+            },
+            APIError::InvalidResponse { status, resp_body } => APIError::InvalidResponse {
+                status,
+                resp_body: resp_body.map(|b| ResponseBody(Cow::Owned(b.0.into_owned()))),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ObjectRetrievalShardSpec {
     /// Hex-encoded shard digest
@@ -237,81 +312,6 @@ impl<'desc, 'resp_body> ObjectCreateResponse<'desc, 'resp_body> {
             ObjectCreateResponse::APIError(api_error) => {
                 ObjectCreateResponse::APIError(api_error.into_owned())
             }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ResponseBody<'a>(pub Cow<'a, [u8]>);
-impl std::fmt::Debug for ResponseBody<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.debug_tuple("ResponseBody")
-            .field(&String::from_utf8_lossy(&self.0))
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-#[serde(deny_unknown_fields)]
-#[serde(rename_all = "snake_case")]
-pub enum APIError<'desc, 'resp_body> {
-    /// An unexpected, internal server error
-    ///
-    /// An unexpected internal server error occurred. The inner
-    /// description may contain more information about the
-    /// error. Please submit a bug report when encountering this
-    /// error.
-    InternalServerError {
-        #[serde(borrow)]
-        description: Cow<'desc, str>,
-    },
-
-    /// We are unable to parse the response
-    #[serde(skip)]
-    InvalidResponse {
-        /// The HTTP error code provided by the coordinator
-        ///
-        /// The error code should never exceed a 3-digit stricly
-        /// positive integer. We wrap it into an Option<NonZeroU16>
-        /// nonetheless to capture the case whether the request has a
-        /// malformed error code.
-        status: Option<NonZeroU16>,
-
-        /// The HTTP response body represented as a byte slice
-        ///
-        /// This is not represented as a string as it might not be
-        /// valid UTF-8.
-        resp_body: Option<ResponseBody<'resp_body>>,
-    },
-}
-
-impl<'desc, 'resp_body> APIError<'desc, 'resp_body> {
-    pub fn http_status_code(&self) -> Option<NonZeroU16> {
-        match self {
-            // 500: Internal Server Error
-            APIError::InternalServerError { .. } => Some(NonZeroU16::new(500).unwrap()),
-
-            // InvalidResponse does not have an associated HTTP status code.
-            APIError::InvalidResponse { .. } => None,
-        }
-    }
-
-    pub fn set_invalid_response_status_code(&mut self, new_status: NonZeroU16) {
-        if let APIError::InvalidResponse { ref mut status, .. } = self {
-            *status = Some(new_status);
-        }
-    }
-
-    pub fn into_owned(self) -> APIError<'static, 'static> {
-        match self {
-            APIError::InternalServerError { description } => APIError::InternalServerError {
-                description: Cow::Owned(description.into_owned()),
-            },
-            APIError::InvalidResponse { status, resp_body } => APIError::InvalidResponse {
-                status,
-                resp_body: resp_body.map(|b| ResponseBody(Cow::Owned(b.0.into_owned()))),
-            },
         }
     }
 }
