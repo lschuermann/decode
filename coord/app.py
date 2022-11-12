@@ -183,7 +183,7 @@ def upload_object():
     num_data_shards = min(math.ceil(size_chunk / min_shard_size), max_data_shards)
     size_shard = math.ceil(size_chunk / num_data_shards)
     shard_map = []
-    uuid_file = uuid.uuid5(uuid.NAMESPACE_DNS, 'object.txt') #PLACEHOLDER for now
+    uuid_file = uuid.uuid4() #PLACEHOLDER for now
     for _ in range(num_chunck):
         chunk = []
         nodes = place_shards(num_data_shards, [], size_shard) 
