@@ -3,6 +3,7 @@ import os
 from flask import Flask, request, jsonify, request, make_response
 from flask_migrate import Migrate
 from flask_api import status
+from randomdict import RandomDict
 import toml
 import math
 import uuid
@@ -32,7 +33,7 @@ stats_timeout = config['liveness_check']['stats_timeout']
 class ShardNodeMap:
     def __init__(self):
         self.shard_to_nodes = {}
-        self.nodemap = {}
+        self.nodemap = RandomDict()
     
     def add_node(self, node_id, node_url, shards):     
         self.nodemap[node_id] = NodeStatus(node_url, shards)
@@ -126,9 +127,9 @@ def place_shards(number_shards, excluded_nodes, shard_size):
 # Selection algorithm 
 def place_shard(excluded_nodes, shard_size):
     while(1):
-        item = shard_node_map.random_item()
+        item = shard_node_map.nodemap.random_item()
         # if item.key not in excluded_nodes and item.value.disk_usage > shard_size:
-        return item.key, item.value.url
+        return item[0], item[1].url
     
 
 @app.route("/")
