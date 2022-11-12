@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::num::NonZeroU16;
 
 use reqwest;
@@ -76,7 +77,7 @@ impl NodeAPIClient {
 
     pub async fn upload_shard(
         &self,
-        base_url: &reqwest::Url,
+        base_url: impl Borrow<reqwest::Url>,
         ticket: impl AsRef<str>,
         reader: impl AsyncRead + AsyncReadExt + Unpin + Send + Sync + 'static,
     ) -> Result<(), NodeAPIUploadError> {
@@ -91,6 +92,7 @@ impl NodeAPIClient {
             .http_client
             .post(
                 base_url
+                    .borrow()
                     .join("/v0/shard")
                     .expect("Failed to construct shard upload URL"),
             )

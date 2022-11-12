@@ -317,12 +317,12 @@ async fn upload_chunk(
     async_reed_solomon: &mut AsyncReedSolomon,
     object_file: &mut async_fs::File,
     upload_map: &coord_api::ObjectUploadMap,
-    chunk_idx: u64,
+    chunk_idx: usize,
 ) -> Result<(), exitcode::ExitCode> {
-    let chunk_offset = upload_map.chunk_size * chunk_idx;
+    let chunk_offset = upload_map.chunk_size * chunk_idx as u64;
     let chunk_size = std::cmp::min(
         upload_map.chunk_size as usize,
-        (upload_map.object_size - (upload_map.chunk_size * chunk_idx)) as usize,
+        (upload_map.object_size - (upload_map.chunk_size * chunk_idx as u64)) as usize,
     );
     log::info!(
         "Upload chunk #{}, starting at offset {}, length {}",
@@ -346,10 +346,10 @@ async fn upload_chunk(
                     MISC_ERR
                 })?;
 
-        if current_offset != upload_map.chunk_size * chunk_idx {
+        if current_offset != upload_map.chunk_size * chunk_idx as u64 {
             panic!(
                 "Unexpected offset in file, expected: {}, actual: {}",
-                upload_map.chunk_size * chunk_idx,
+                upload_map.chunk_size * chunk_idx as u64,
                 current_offset
             );
         }
@@ -357,16 +357,30 @@ async fn upload_chunk(
 
     async fn upload_shards(
         node_api_client: &NodeAPIClient,
-        chunk_idx: u64,
+        chunk_idx: usize,
         encoded_readers: Vec<async_io::DuplexStream>,
+        shard_specs: &[coord_api::ObjectUploadShardSpec],
     ) -> Result<(), exitcode::ExitCode> {
-        // TODO!
-        let parsed_node_url = parse_url("http://localhost:8000", "node")?;
+        assert!(encoded_readers.len() == shard_specs.len());
 
         // Spawn the clients, one for every reader:
         let upload_requests: Vec<_> = encoded_readers
             .into_iter()
-            .map(|reader| node_api_client.upload_shard(&parsed_node_url, "", reader))
+            .zip(shard_specs.iter())
+            .enumerate()
+            .map(|(shard_idx, (reader, shard_spec))| {
+                log::info!(
+                    "Uploading shard #{} of chunk #{} to node \"{}\"",
+                    shard_idx,
+                    chunk_idx,
+                    &shard_spec.node,
+                );
+                node_api_client.upload_shard(
+                    Url::parse(&shard_spec.node).unwrap(),
+                    &shard_spec.ticket,
+                    reader,
+                )
+            })
             .collect();
 
         // Finally, collectively await the requests:
@@ -396,7 +410,7 @@ async fn upload_chunk(
         async_reed_solomon: &mut AsyncReedSolomon,
         object_file: &mut async_fs::File,
         mut encoded_writers: Vec<async_io::DuplexStream>,
-        chunk_idx: u64,
+        chunk_idx: usize,
         chunk_size: usize,
     ) -> Result<(), exitcode::ExitCode> {
         async_reed_solomon
@@ -435,7 +449,12 @@ async fn upload_chunk(
     );
 
     // ...while in parallel streaming the resulting encoded shards:
-    let upload_fut = upload_shards(node_api_client, chunk_idx, encoded_readers);
+    let upload_fut = upload_shards(
+        node_api_client,
+        chunk_idx,
+        encoded_readers,
+        upload_map.shard_map[chunk_idx as usize].as_slice(),
+    );
 
     // Now, execute both:
     futures::try_join!(encode_fut, upload_fut)?;
@@ -517,6 +536,73 @@ async fn upload_command(cli: &Cli, cmd: &UploadCommand) -> Result<(), exitcode::
         upload_map.code_ratio_parity
     );
 
+    // Validate that the shard_map corresponds to the calculated number of
+    // chunks in an object and encoded shards in a chunk. Also, we need to be
+    // able to parse all provided URLs before attempting to upload anything.
+    if upload_map.object_size != object_size {
+        log::error!(
+            "The object size of the upload map ({}) does not match the actual \
+	     object size ({})",
+            upload_map.object_size,
+            object_size,
+        );
+        return Err(MISC_ERR);
+    };
+
+    let chunk_count = div_ceil(upload_map.object_size, upload_map.chunk_size);
+    if upload_map.shard_map.len() as u64 != chunk_count {
+        log::error!(
+            "The provided shard map does not contain the expected number of \
+	     chunks (expected: {}, actual: {})",
+            chunk_count,
+            upload_map.shard_map.len(),
+        );
+        return Err(MISC_ERR);
+    }
+
+    let shard_count = div_ceil(upload_map.chunk_size, upload_map.shard_size);
+    if shard_count != upload_map.code_ratio_data as u64 {
+        log::error!(
+            "The provided chunk_size and shard_size result in {} shards per \
+	     chunk, however the code parameters provided expect {} data shards",
+            shard_count,
+            upload_map.code_ratio_data,
+        );
+    }
+
+    for (chunk_idx, chunk_shards) in upload_map.shard_map.iter().enumerate() {
+        if chunk_shards.len()
+            != upload_map.code_ratio_data as usize + upload_map.code_ratio_parity as usize
+        {
+            log::error!(
+                "The provided upload map defines {} data and parity shards for \
+		 chunk {}, however the code parameters dictate {} data and {} \
+		 parity shards per chunk.",
+                chunk_shards.len(),
+                chunk_idx,
+                upload_map.code_ratio_data,
+                upload_map.code_ratio_parity,
+            );
+
+            return Err(MISC_ERR);
+        }
+
+        for (shard_idx, shard_spec) in chunk_shards.iter().enumerate() {
+            if let Err(e) = reqwest::Url::parse(&shard_spec.node) {
+                log::error!(
+                    "Unable to parse node URL provided for shard {} of chunk \
+		     {}: \"{}\", encountered error {:?}",
+                    shard_idx,
+                    chunk_idx,
+                    shard_spec.node,
+                    e,
+                );
+
+                return Err(MISC_ERR);
+            }
+        }
+    }
+
     // TODO: error handling!
     let mut async_reed_solomon = AsyncReedSolomon::new(
         upload_map.code_ratio_data as usize,
@@ -527,7 +613,7 @@ async fn upload_command(cli: &Cli, cmd: &UploadCommand) -> Result<(), exitcode::
 
     let node_api_client = NodeAPIClient::new();
 
-    for chunk_idx in 0..div_ceil(upload_map.object_size, upload_map.chunk_size) {
+    for chunk_idx in 0..upload_map.shard_map.len() {
         upload_chunk(
             cli,
             &node_api_client,
