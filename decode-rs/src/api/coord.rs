@@ -262,7 +262,10 @@ pub enum APIError<'desc, 'resp_body> {
     /// description may contain more information about the
     /// error. Please submit a bug report when encountering this
     /// error.
-    InternalServerError { description: Cow<'desc, str> },
+    InternalServerError {
+        #[serde(borrow)]
+        description: Cow<'desc, str>,
+    },
 
     /// We are unable to parse the response
     #[serde(skip)]

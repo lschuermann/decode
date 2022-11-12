@@ -37,11 +37,15 @@ pub enum APIError<'desc, 'resp_body> {
     /// willing to accept in a single shard currently.
     ShardTooLarge {
         max_bytes: u64,
+        #[serde(borrow)]
         description: Cow<'desc, str>,
     },
 
     /// The requested resource could not be found
-    ResourceNotFound { description: Cow<'desc, str> },
+    ResourceNotFound {
+        #[serde(borrow)]
+        description: Cow<'desc, str>,
+    },
 
     /// An unexpected, internal server error
     ///
@@ -49,7 +53,10 @@ pub enum APIError<'desc, 'resp_body> {
     /// description may contain more information about the
     /// error. Please submit a bug report when encountering this
     /// error.
-    InternalServerError { description: Cow<'desc, str> },
+    InternalServerError {
+        #[serde(borrow)]
+        description: Cow<'desc, str>,
+    },
 
     /// We are unable to parse the error response
     #[serde(skip)]
