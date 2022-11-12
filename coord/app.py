@@ -150,7 +150,7 @@ def json_error():
 def ensure_json():
     return request.headers.get("Content-Type") == "application/json"
 
-@app.route("/v0/node/<node_id>", methods = ["POST"])
+@app.route("/v0/node/<node_id>", methods = ["PUT"])
 def node_register(node_id):
     if not ensure_json():
         return json_error()
