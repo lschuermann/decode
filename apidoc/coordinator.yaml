@@ -74,52 +74,43 @@ paths:
                 upload_results:
                   type: array
                   items:
-                    type: object
-                    required:
-                      - chunk_index
-                      - shard_index
-                      - digest
-                      - receipt
-                    properties:
-                      chunk_index:
-                        type: integer
-                        description: Index of the chunk into all chunks
-                      shard_index:
-                        type: integer
-                        description: Index of the shard into corresponding chunk
-                      digest:
-                        type: string
-                        description: Sha3-256 digest of shard
-                      receipt:
-                        type: string
-                        description: Receipt from uploading to node
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - digest
+                        - receipt
+                      properties:
+                        digest:
+                          type: string
+                          description: Sha3-256 digest of shard
+                        receipt:
+                          type: string
+                          description: Receipt from uploading to node
                 object_upload_map:
                   $ref: "#/components/schemas/ObjectUploadMap"
       responses:
         '200':
           description: Object uploaded
   
-  /v0/node/{nodeid}:
-    put:
+  /v0/node:
+    post:
       summary: Register a new node
       security:
         - bearerAuth: []
-      parameters:
-        - name: nodeid
-          in: path
-          required: true
-          description: UUID of node
-          schema:
-            type: string
       requestBody:
         content:
           application/json:
             schema:
               type: object
               required:
+                - node_id
                 - node_url
                 - shards
               properties:
+                node_id:
+                  type: string
+                  description: UUID of node
                 node_url:
                   type: string
                   description: URL of node
@@ -296,3 +287,4 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      
