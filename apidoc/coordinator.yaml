@@ -93,24 +93,27 @@ paths:
         '200':
           description: Object uploaded
   
-  /v0/node:
-    post:
+  /v0/node/{nodeId}:
+    put:
       summary: Register a new node
       security:
         - bearerAuth: []
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: UUID of object
+          schema:
+            type: string
       requestBody:
         content:
           application/json:
             schema:
               type: object
               required:
-                - node_id
                 - node_url
                 - shards
               properties:
-                node_id:
-                  type: string
-                  description: UUID of node
                 node_url:
                   type: string
                   description: URL of node
