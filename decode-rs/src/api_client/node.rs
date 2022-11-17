@@ -1,9 +1,11 @@
 use std::borrow::Borrow;
+use std::io;
 use std::num::NonZeroU16;
 
 use reqwest;
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use futures_util::stream::StreamExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::api::node as node_api;
 
@@ -64,6 +66,40 @@ impl NodeAPIUploadError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum NodeAPIDownloadError {
+    /// Miscellaneous client error not specific to this request type:
+    MiscError(NodeAPIClientError),
+
+    /// IO Error while writing to the provided writer
+    WriteIOError(io::ErrorKind),
+}
+
+impl NodeAPIDownloadError {
+    fn from_reqwest_error(err: reqwest::Error) -> NodeAPIDownloadError {
+        // Handle the generic reqwest error cases first:
+        match NodeAPIClientError::from_reqwest_generic_err(err) {
+            Ok(generic_err) => NodeAPIDownloadError::MiscError(generic_err),
+            Err(_err) => {
+                // There should be no download-specific cases which can
+                // cause a [reqwest::Error] to occur. Hence return a
+                // miscellaneous Unknown error:
+                NodeAPIDownloadError::MiscError(NodeAPIClientError::Unknown)
+            }
+        }
+    }
+
+    // TODO: we should probably analze the content-type and status code to
+    // determine whether we need to interpret the response as a shard or an API
+    // error
+    //
+    // fn from_api_error<'desc, 'resp_body>(
+    //     apierr: node_api::APIError<'desc, 'resp_body>,
+    // ) -> NodeAPIDownloadError {
+    //     NodeAPIDownloadError::MiscError(NodeAPIClientError::APIError(apierr.into_owned()))
+    // }
+}
+
 pub struct NodeAPIClient {
     http_client: reqwest::Client,
 }
@@ -119,5 +155,45 @@ impl NodeAPIClient {
                 Err(NodeAPIUploadError::from_api_error(api_err))
             }
         }
+    }
+
+    pub async fn download_shard(
+        &self,
+        base_url: impl Borrow<reqwest::Url>,
+        object_id: impl AsRef<[u8; 32]>,
+        ticket: impl AsRef<str>,
+        mut writer: impl AsyncWrite + AsyncWriteExt + Unpin + Send + Sync + 'static,
+    ) -> Result<(), NodeAPIDownloadError> {
+        let mut resp_stream = self
+            .http_client
+            .get(
+                base_url
+                    .borrow()
+                    .join("/v0/shard/")
+                    .and_then(|url| url.join(&hex::encode(object_id.as_ref())))
+                    .expect("Failed to construct shard retrieval URL"),
+            )
+            .header(
+                reqwest::header::AUTHORIZATION,
+                &format!("Bearer {}", ticket.as_ref()),
+            )
+            .send()
+            .await
+            .map_err(NodeAPIDownloadError::from_reqwest_error)?
+            .bytes_stream();
+
+        while let Some(item) = resp_stream.next().await {
+            match item {
+                Err(reqwest_error) => {
+                    return Err(NodeAPIDownloadError::from_reqwest_error(reqwest_error))
+                }
+                Ok(mut buffer) => writer
+                    .write_all_buf(&mut buffer)
+                    .await
+                    .map_err(|ioerror| NodeAPIDownloadError::WriteIOError(ioerror.kind()))?,
+            }
+        }
+
+        Ok(())
     }
 }

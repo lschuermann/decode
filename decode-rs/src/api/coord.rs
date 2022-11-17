@@ -164,6 +164,80 @@ impl ObjectRetrievalMap {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum ObjectRetrievalResponse<'desc, 'resp_body> {
+    /// Object retrieve request was successfull, the client is provided
+    /// with an object retrieval map.
+    Success(ObjectRetrievalMap),
+    /// An error was returned in response to the object retrieve
+    /// request. The error has been deserialized into the
+    /// corresponding field.
+    APIError(APIError<'desc, 'resp_body>),
+}
+
+impl<'desc, 'resp_body> ObjectRetrievalResponse<'desc, 'resp_body> {
+    pub fn from_bytes<'a: 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
+        // Try to parse as success type first:
+        serde_json::from_slice::<'a, ObjectRetrievalMap>(bytes)
+            .map(ObjectRetrievalResponse::Success)
+            .or_else(|_| {
+                serde_json::from_slice::<'a, APIError<'a, 'a>>(bytes)
+                    .map(ObjectRetrievalResponse::APIError)
+            })
+            .unwrap_or_else(|_| {
+                ObjectRetrievalResponse::APIError(APIError::InvalidResponse {
+                    status: None,
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            })
+    }
+
+    pub fn from_http_resp<'a: 'desc + 'resp_body>(status: NonZeroU16, bytes: &'a [u8]) -> Self {
+        // Use the regular `from_bytes` to parse:
+        let mut parsed = Self::from_bytes(bytes);
+
+        // When we've gotten a parsed success and/or error, check that
+        // the expected HTTP response code matches the passed one. If
+        // not, return an [`APIError::InvalidResponse`].
+        let expected_status = match parsed {
+            ObjectRetrievalResponse::Success(_) => Some(NonZeroU16::new(200).unwrap()),
+            ObjectRetrievalResponse::APIError(ref err) => err.http_status_code(),
+        };
+
+        if let Some(expected_status_code) = expected_status {
+            if expected_status_code != status {
+                ObjectRetrievalResponse::APIError(APIError::InvalidResponse {
+                    status: Some(status),
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            } else {
+                // Parsing worked, code matches
+                parsed
+            }
+        } else {
+            // Parsing did not yield a success variant OR an error
+            // with an expected status, pass the parsed result (which
+            // likely is a [`APIError::InvalidResponse`])
+            // through and set the actual received status:
+            if let ObjectRetrievalResponse::APIError(ref mut api_err) = &mut parsed {
+                api_err.set_invalid_response_status_code(status);
+            }
+            parsed
+        }
+    }
+
+    pub fn into_owned(self) -> ObjectRetrievalResponse<'static, 'static> {
+        match self {
+            ObjectRetrievalResponse::Success(object_retrieval_map) => {
+                ObjectRetrievalResponse::Success(object_retrieval_map)
+            }
+            ObjectRetrievalResponse::APIError(api_error) => {
+                ObjectRetrievalResponse::APIError(api_error.into_owned())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectUploadShardSpec {
     /// Base-URL of the node (excluding the /v0 API version subpath):

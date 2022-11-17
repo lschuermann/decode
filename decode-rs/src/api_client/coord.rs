@@ -90,6 +90,33 @@ impl CoordAPIObjectFinalizeError {
 }
 
 #[derive(Debug, Clone)]
+pub enum CoordAPIObjectRetrievalError {
+    /// Miscellaneous client error not specific to this request type:
+    MiscError(CoordAPIClientError),
+}
+
+impl CoordAPIObjectRetrievalError {
+    fn from_reqwest_error(err: reqwest::Error) -> CoordAPIObjectRetrievalError {
+        // Handle the generic reqwest error cases first:
+        match CoordAPIClientError::from_reqwest_generic_err(err) {
+            Ok(generic_err) => CoordAPIObjectRetrievalError::MiscError(generic_err),
+            Err(_err) => {
+                // There should be no finalize-specific cases which can
+                // cause a [reqwest::Error] to occur. Hence return a
+                // miscellaneous Unknown error:
+                CoordAPIObjectRetrievalError::MiscError(CoordAPIClientError::Unknown)
+            }
+        }
+    }
+
+    fn from_api_error<'desc, 'resp_body>(
+        apierr: coord_api::APIError<'desc, 'resp_body>,
+    ) -> CoordAPIObjectRetrievalError {
+        CoordAPIObjectRetrievalError::MiscError(CoordAPIClientError::APIError(apierr.into_owned()))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum CoordAPIRegisterError {
     /// Miscellaneous client error not specific to this request type:
     MiscError(CoordAPIClientError),
@@ -243,6 +270,39 @@ impl CoordAPIClient {
             coord_api::ObjectFinalizeResponse::Success => Ok(()),
             coord_api::ObjectFinalizeResponse::APIError(api_err) => {
                 Err(CoordAPIObjectFinalizeError::from_api_error(api_err))
+            }
+        }
+    }
+
+    pub async fn get_object<'digest>(
+        &self,
+        object_id: uuid::Uuid,
+    ) -> Result<coord_api::ObjectRetrievalMap, CoordAPIObjectRetrievalError> {
+        let resp = self
+            .http_client
+            .get(
+                self.base_url
+                    .join("/v0/object/")
+                    .and_then(|url| url.join(&object_id.to_string()))
+                    .expect("Failed to construct object retrieval URL"),
+            )
+            .send()
+            .await
+            .map_err(CoordAPIObjectRetrievalError::from_reqwest_error)?;
+
+        let status = NonZeroU16::new(resp.status().as_u16()).unwrap();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(CoordAPIObjectRetrievalError::from_reqwest_error)?;
+        let parsed = coord_api::ObjectRetrievalResponse::from_http_resp(status, bytes.as_ref());
+
+        match parsed {
+            coord_api::ObjectRetrievalResponse::Success(object_retrieval_map) => {
+                Ok(object_retrieval_map)
+            }
+            coord_api::ObjectRetrievalResponse::APIError(api_err) => {
+                Err(CoordAPIObjectRetrievalError::from_api_error(api_err))
             }
         }
     }

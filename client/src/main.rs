@@ -14,7 +14,7 @@ use tokio::io::{self as async_io, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrit
 use decode_rs::api::coord as coord_api;
 use decode_rs::api::node as node_api;
 use decode_rs::api_client::coord::CoordAPIClient;
-use decode_rs::api_client::node::{NodeAPIClient, NodeAPIUploadError};
+use decode_rs::api_client::node::{NodeAPIClient, NodeAPIDownloadError, NodeAPIUploadError};
 use decode_rs::api_client::reqwest::Url;
 
 use reed_solomon_erasure::{galois_8::Field as Galois8Field, Error as RSError, ReedSolomon};
@@ -185,6 +185,12 @@ struct UploadCommand {
     object_path: String,
 }
 
+#[derive(Parser)]
+struct DownloadCommand {
+    /// Object URL (decode://<hostname>/<object-id>)
+    object_url: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum AsyncReedSolomonError {
     /// Mismatch between the number of readers, writers and/or
@@ -212,7 +218,7 @@ pub struct AsyncReedSolomon {
     // something which is AsRefMut<Option<AsRefMut<[u8]>>>?
     input_buffers: Vec<Vec<u8>>,
     output_buffers: Vec<Vec<u8>>,
-    interspersed_read_buffer: Vec<u8>,
+    interspersed_buffer: Vec<u8>,
 }
 
 impl AsyncReedSolomon {
@@ -230,7 +236,7 @@ impl AsyncReedSolomon {
             burst_len,
             input_buffers,
             output_buffers,
-            interspersed_read_buffer: Vec::new(),
+            interspersed_buffer: Vec::new(),
         })
     }
 
@@ -242,8 +248,8 @@ impl AsyncReedSolomon {
                 buf.clear();
                 buf.shrink_to_fit();
             });
-        self.interspersed_read_buffer.clear();
-        self.interspersed_read_buffer.shrink_to_fit();
+        self.interspersed_buffer.clear();
+        self.interspersed_buffer.shrink_to_fit();
     }
 
     pub async fn read_interspersed_data<R: AsyncRead + AsyncReadExt + Unpin, BR: BorrowMut<R>>(
@@ -259,14 +265,14 @@ impl AsyncReedSolomon {
         // and passing a mutable slice, retrying until we've hit an Eof or read
         // the maximum length. For this, extend the buffer to the desired length
         // (we don't care about any preexisting contents):
-        self.interspersed_read_buffer.resize(limit, 0);
+        self.interspersed_buffer.resize(limit, 0);
 
         // Now, read the data:
         let mut offset = 0;
         while offset < limit {
             let read_bytes: usize = reader
                 .borrow_mut()
-                .read(&mut self.interspersed_read_buffer[offset..limit])
+                .read(&mut self.interspersed_buffer[offset..limit])
                 .await
                 .map_err(
                     // Eof is not reported as an error to us here.
@@ -298,7 +304,7 @@ impl AsyncReedSolomon {
         // Now actually copy the data:
         let mut column = 0;
         let mut shard = 0;
-        for byte in self.interspersed_read_buffer[..data_len].iter() {
+        for byte in self.interspersed_buffer[..data_len].iter() {
             // Insert the byte into the appropriate shard:
             self.input_buffers[shard][column] = *byte;
 
@@ -329,6 +335,43 @@ impl AsyncReedSolomon {
         );
 
         Ok((data_len, column))
+    }
+
+    pub async fn write_interspersed_data<
+        W: AsyncWrite + AsyncWriteExt + Unpin,
+        BW: BorrowMut<W>,
+    >(
+        &mut self,
+        mut writer: BW,
+        limit: usize,
+    ) -> Result<(), AsyncReedSolomonError> {
+        // Reading the transposed data stream byte-by-byte into the
+        // [`AsyncWrite`] will be much too expensive (even with a buffered
+        // writer). Instead, first write as much data as we can into the
+        // transposed buffer. For this, reserve the required capacity and clear
+        // the buffer. This should not reallocate if the underlying [`Vec`] is
+        // already of sufficient capacity:
+        self.interspersed_buffer.clear();
+        self.interspersed_buffer.reserve(limit);
+
+        // Build a transposed view of the data slices, creating an iterator over
+        // them and collecting this iterator into the transposed buffer:
+        self.interspersed_buffer.extend(
+            transposed_slices::TransposedSlices::new(
+                &self.input_buffers[..self.rs.data_shard_count()],
+            )
+            .iter()
+            .take(limit),
+        );
+
+        // Stream the entire written Vec into the passed writer:
+        writer
+            .borrow_mut()
+            .write_all(&self.interspersed_buffer)
+            .await
+            .map_err(|ioerr| AsyncReedSolomonError::IOError(ioerr.kind()))?;
+
+        Ok(())
     }
 
     pub async fn encode<
@@ -446,6 +489,131 @@ impl AsyncReedSolomon {
             .map_err(|e| AsyncReedSolomonError::IOError(e.kind()))?;
 
         // All data processed, writers closed, we are done:
+        Ok(())
+    }
+
+    pub async fn reconstruct_data<
+        R: AsyncRead + AsyncReadExt + Unpin,
+        BR: BorrowMut<R>,
+        W: AsyncWrite + AsyncWriteExt + Unpin,
+        BW: BorrowMut<W>,
+    >(
+        &mut self,
+        readers: &mut [Option<BR>],
+        mut writer: BW,
+        len: usize,
+    ) -> Result<(), AsyncReedSolomonError> {
+        // Basic sanity check: we can't recunstruct any data if we don't have at
+        // least as many readers as data shards. Also, the length of the readers
+        // list should be equal to the number of data and parity shards, as we
+        // use the index of readers for the shard index:
+        let reader_count = readers.iter().filter(|r| r.is_some()).count();
+        if readers.len() != self.rs.data_shard_count() + self.rs.parity_shard_count()
+            || reader_count != self.rs.data_shard_count()
+        {
+            return Err(AsyncReedSolomonError::MissingReadersWriters);
+        }
+
+        // Ensure that the input_buffer length (for all present readers) is
+        // sufficient to capture enough data from the writers up to burst
+        // length. For this, clear and then reserve the required space (we're
+        // clearing the contents on writing them once per iteration anyways). We
+        // do this for the first `data_shard_count` buffers, as well as for all
+        // other writer's buffers provided.
+        self.input_buffers
+            .iter_mut()
+            .zip(readers.iter())
+            .enumerate()
+            .filter(|(i, (_b, r))| *i < self.rs.data_shard_count() || r.is_some())
+            .for_each(|(_i, (b, _r))| {
+                b.clear();
+                b.resize(self.burst_len, 0);
+            });
+
+        // Reconstruct from bursts of reads until we've reconstructed `len`
+        // bytes of data:
+        let mut reconstructed: usize = 0;
+        while reconstructed < len {
+            // Determine the remaining read length on a per-reader granularity
+            // and then issue the reads simutaneously:
+            let read_columns = (std::cmp::min(len - reconstructed, self.burst_len)
+                + self.rs.data_shard_count()
+                - 1)
+                / self.rs.data_shard_count();
+
+            // Subslice the buffers once, returning a data structure whose
+            // format is compatible with what [`ReedSolomon::reconstruct_data`]
+            // expects:
+            let mut limited_buffers: Vec<(&mut [u8], bool)> = self
+                .input_buffers
+                .iter_mut()
+                .zip(readers.iter())
+                .enumerate()
+                .map(|(i, (b, r))| {
+                    if r.is_some() {
+                        (&mut b[..read_columns], true)
+                    } else if i < self.rs.data_shard_count() {
+                        (&mut b[..read_columns], false)
+                    } else {
+                        // Don't actually slice any memory, this shard must not
+                        // be relevant to the Reed Solomon reconstruction
+                        // because we don't have it, and it is not one of the
+                        // data shards to be reconstructed.
+                        (&mut b[..0], false)
+                    }
+                })
+                .collect();
+
+            let read_results: Vec<Result<usize, std::io::Error>> = futures::future::join_all(
+                limited_buffers
+                    .iter_mut()
+                    .zip(readers.iter_mut())
+                    .filter_map(|((buffer, valid), opt_reader)| {
+                        if *valid {
+                            assert!(buffer.len() == read_columns);
+                            Some((buffer, opt_reader.as_mut().unwrap()))
+                        } else {
+                            None
+                        }
+                    })
+                    .map(|(buffer, reader)| reader.borrow_mut().read_exact(buffer)),
+            )
+            .await;
+
+            // Iterate over the write results, reporting the first error we can
+            // find. [`AsyncReadExt::read_exact`] is specified to return an
+            // error of [`io::ErrorKind::UnexpectedEof`] if it can't fill the
+            // entire buffer, hence we can ignore the returned usize length.
+            read_results
+                .iter()
+                .find(|res| res.is_err())
+                .unwrap_or(&Ok(0))
+                .as_ref()
+                .map_err(|e| AsyncReedSolomonError::IOError(e.kind()))?;
+
+            // Run the routine for reconstructing shards.
+            self.rs
+                .reconstruct_data(&mut limited_buffers)
+                .map_err(AsyncReedSolomonError::ReedSolomonError)?;
+
+            // Make sure that the reconstruction algorithm has marked all data
+            // shards as valid and their length hasn't been changed.
+            assert!(limited_buffers[..self.rs.data_shard_count()]
+                .iter()
+                .find(|(buffer, valid)| !valid || buffer.len() != read_columns)
+                .is_none());
+
+            // Okay, now dump the buffer contents into the writer:
+            let write_len = std::cmp::min(
+                len - reconstructed,
+                read_columns * self.rs.data_shard_count(),
+            );
+            self.write_interspersed_data::<W, &mut W>(writer.borrow_mut(), write_len)
+                .await?;
+
+            reconstructed += write_len;
+        }
+
         Ok(())
     }
 }
@@ -804,10 +972,378 @@ async fn upload_command(cli: &Cli, cmd: &UploadCommand) -> Result<(), exitcode::
     Ok(())
 }
 
+async fn download_command(_cli: &Cli, cmd: &DownloadCommand) -> Result<(), exitcode::ExitCode> {
+    // Try to parse the passed coordinator base URL:
+    let (parsed_url, _) = parse_url(&cmd.object_url, "coordinator")?;
+
+    // Parse the specified path as a UUID:
+    let object_id_str = parsed_url.path().strip_prefix("/").unwrap();
+    let object_id = uuid::Uuid::parse_str(object_id_str).map_err(|e| {
+        log::error!(
+            "Failed to parse provided object URL, unable to interpret \"{}\" \
+	     as UUID: {:?}",
+            object_id_str,
+            e
+        );
+        MISC_ERR
+    })?;
+
+    // Create the coordinator API client:
+    let coord_api_client = CoordAPIClient::new(parsed_url.clone());
+
+    // Fetch the object retrieval map, guiding us to shards:
+    let retrieval_map = coord_api_client.get_object(object_id).await.map_err(|e| {
+        log::error!(
+            "An error occured while querying the object retrieval map from the \
+	     coordinator: {:?}",
+            e,
+        );
+
+        MISC_ERR
+    })?;
+
+    log::info!(
+        "Retrieval map:\n\
+         \t- Object ID: {:?}\n\
+         \t- Object size: {} bytes\n\
+         \t- Chunk size: {} bytes\n\
+         \t- Shard size: {} bytes\n\
+         \t- Code ratio: {} data, {} parity",
+        object_id,
+        retrieval_map.object_size,
+        retrieval_map.chunk_size,
+        retrieval_map.shard_size,
+        retrieval_map.code_ratio_data,
+        retrieval_map.code_ratio_parity
+    );
+
+    let chunk_count = div_ceil(retrieval_map.object_size, retrieval_map.chunk_size);
+    if retrieval_map.shard_map.len() as u64 != chunk_count {
+        log::error!(
+            "The provided shard map does not contain the expected number of \
+	     chunks (expected: {}, actual: {})",
+            chunk_count,
+            retrieval_map.shard_map.len(),
+        );
+        return Err(MISC_ERR);
+    }
+
+    let shard_count = div_ceil(retrieval_map.chunk_size, retrieval_map.shard_size);
+    if shard_count != retrieval_map.code_ratio_data as u64 {
+        log::error!(
+            "The provided chunk_size and shard_size result in {} shards per \
+	     chunk, however the code parameters provided expect {} data shards",
+            shard_count,
+            retrieval_map.code_ratio_data,
+        );
+    }
+
+    for (chunk_idx, chunk_shards) in retrieval_map.shard_map.iter().enumerate() {
+        if chunk_shards.len()
+            != retrieval_map.code_ratio_data as usize + retrieval_map.code_ratio_parity as usize
+        {
+            log::error!(
+                "The provided upload map defines {} data and parity shards for \
+		 chunk {}, however the code parameters dictate {} data and {} \
+		 parity shards per chunk.",
+                chunk_shards.len(),
+                chunk_idx,
+                retrieval_map.code_ratio_data,
+                retrieval_map.code_ratio_parity,
+            );
+
+            return Err(MISC_ERR);
+        }
+
+        for (shard_idx, shard_spec) in chunk_shards.iter().enumerate() {
+            for (node_idx, node_ref) in shard_spec.nodes.iter().enumerate() {
+                if *node_ref >= retrieval_map.node_map.len() {
+                    log::error!(
+                        "Node #{} of shard #{} of chunk #{} is out of bounds \
+			 of the node_map list.",
+                        node_idx,
+                        shard_idx,
+                        chunk_idx,
+                    );
+
+                    return Err(MISC_ERR);
+                }
+            }
+        }
+    }
+
+    let parsed_node_map = retrieval_map
+        .node_map
+        .iter()
+        .map(|node_url_str| {
+            reqwest::Url::parse(&node_url_str).map_err(|parse_err| {
+                log::error!(
+                    "Unable to parse node URL \"{}\", encountered error {:?}",
+                    node_url_str,
+                    parse_err,
+                );
+
+                MISC_ERR
+            })
+        })
+        .collect::<Result<Vec<reqwest::Url>, exitcode::ExitCode>>()?;
+
+    // TODO: implement mechanism to parse file name from URL and to allow
+    // overriding it from the CLI
+    let object_path = PathBuf::from(object_id.to_string());
+
+    // TODO: implement mechanism to automatically rename the file if one already
+    // exists with a colliding name
+    let mut object_file = async_fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&object_path)
+        .await
+        .map_err(|ioerr| match ioerr.kind() {
+            io::ErrorKind::AlreadyExists => {
+                log::error!(
+                    "Unable to create output file at \"{}\", file exists!",
+                    object_path.display(),
+                );
+
+                exitcode::CANTCREAT
+            }
+            _ => {
+                log::error!("Error while creating output file: {:?}", ioerr);
+                MISC_ERR
+            }
+        })?;
+
+    // TODO: error handling!
+    let mut async_reed_solomon = AsyncReedSolomon::new(
+        retrieval_map.code_ratio_data as usize,
+        retrieval_map.code_ratio_parity as usize,
+        1024 * 1024,
+    )
+    .unwrap();
+
+    let node_api_client = NodeAPIClient::new();
+
+    for (chunk_idx, chunk_shards) in retrieval_map.shard_map.iter().enumerate() {
+        let chunk_offset = retrieval_map.chunk_size * chunk_idx as u64;
+        let chunk_size = std::cmp::min(
+            retrieval_map.chunk_size as usize,
+            (retrieval_map.object_size - (retrieval_map.chunk_size * chunk_idx as u64)) as usize,
+        );
+        log::info!(
+            "Downloading chunk #{}, starting at offset {}, length {}",
+            chunk_idx,
+            chunk_offset,
+            chunk_size,
+        );
+
+        // We shouldn't need to seek in the file assuming that AsyncReedSolomon is
+        // correctly implemented. However, when enabling debug output or running on
+        // a debug build, recover the current file offset and print it nonetheless:
+        if cfg!(debug_assertions) {
+            assert_offset(
+                retrieval_map.chunk_size * chunk_idx as u64,
+                &mut object_file,
+            )
+            .await?;
+        }
+
+        async fn download_shards(
+            node_api_client: &NodeAPIClient,
+            chunk_idx: usize,
+            // Per shard index, node URL, SHA3-256 hash of shard, ticket,
+            // expected shard length and a [`DuplexStream`] to read the data
+            // into
+            shards: Vec<(usize, &Url, [u8; 32], &str, async_io::DuplexStream)>,
+        ) -> Result<(), exitcode::ExitCode> {
+            struct DigestWrapper([u8; 32]);
+            impl AsRef<[u8; 32]> for DigestWrapper {
+                fn as_ref(&self) -> &[u8; 32] {
+                    &self.0
+                }
+            }
+
+            // Spawn the clients, one for every shard to download:
+            let download_requests: Vec<_> = shards
+                .into_iter()
+                .map(|(shard_idx, node_url, digest, ticket, writer)| {
+                    log::info!(
+                        "Downloading shard #{} of chunk #{} from node \"{}\"",
+                        shard_idx,
+                        chunk_idx,
+                        node_url,
+                    );
+
+                    node_api_client.download_shard(node_url, DigestWrapper(digest), ticket, writer)
+                })
+                .collect();
+
+            // Finally, collectively await the requests:
+            let download_results: Vec<Result<(), NodeAPIDownloadError>> =
+                futures::future::join_all(download_requests.into_iter()).await;
+
+            // Iterate over the write results, reporting the first error we can find:
+            if let Some((shard_idx, Err(e))) = download_results
+                .iter()
+                .enumerate()
+                .find(|(_, res)| res.is_err())
+            {
+                log::error!(
+                    "Error while downloading shard {} of chunk {}: {:?}",
+                    shard_idx,
+                    chunk_idx,
+                    e
+                );
+                return Err(MISC_ERR);
+            }
+
+            Ok(download_results
+                .into_iter()
+                .map(|res| res.unwrap())
+                .collect())
+        }
+
+        async fn decode_shards(
+            async_reed_solomon: &mut AsyncReedSolomon,
+            mut readers: Vec<Option<async_io::DuplexStream>>,
+            object_file: &mut async_fs::File,
+            chunk_idx: usize,
+            chunk_len: usize,
+        ) -> Result<(), exitcode::ExitCode> {
+            async_reed_solomon
+                .reconstruct_data::<tokio::io::DuplexStream, _, async_fs::File, _>(
+                    &mut readers,
+                    object_file,
+                    chunk_len,
+                )
+                .await
+                .map_err(|e| {
+                    log::error!(
+                        "Error while decoding chunk {} from shards: {:?}",
+                        chunk_idx,
+                        e
+                    );
+                    MISC_ERR
+                })
+        }
+
+        // TODO: this should have a more intricate algorithm of how to select
+        // shards to fetch and the nodes to fetch them from.
+        let mut prev_node_idx = usize::MAX;
+        let (shards_to_fetch, shard_readers) = itertools::process_results(
+            chunk_shards
+                .iter()
+                .enumerate()
+                // Only select shards which have at least one node present. We've
+                // previously already validated that each node entry of a shard must
+                // have a corresponding entry in the node_map.
+                .filter(|(_shard_idx, shard_spec)| shard_spec.nodes.len() > 0)
+                .map(|(shard_idx, shard_spec)| {
+                    // Try to balance our load approximately equally over the nodes
+                    // available for a given chunk's shards by avoiding reselecting
+                    // the previously selected node and cycling through the
+                    // available nodes:
+                    let mut node_found_list_idx: Option<usize> = None;
+                    for (node_list_idx, node) in shard_spec.nodes.iter().enumerate() {
+                        if *node > prev_node_idx {
+                            if let Some(found_node_list_idx) = node_found_list_idx {
+                                if shard_spec.nodes[found_node_list_idx] > *node {
+                                    node_found_list_idx = Some(node_list_idx);
+                                } else {
+                                    // The current node is already closer to the
+                                    // target, so ignore.
+                                }
+                            } else {
+                                node_found_list_idx = Some(node_list_idx);
+                            }
+                        }
+                    }
+
+                    // Fallback: node at index 0
+                    let node_list_idx = node_found_list_idx.unwrap_or(0);
+                    prev_node_idx = shard_spec.nodes[node_list_idx];
+
+                    // Return selected node with its parsed URL:
+                    (shard_idx, &parsed_node_map[prev_node_idx], shard_spec)
+                })
+                // Only take as many shards as we need to reconstruct the full
+                // chunk:
+                .take(retrieval_map.code_ratio_data as usize)
+                // Add a pair of [`DuplexStream`]s for writing into and writing out
+                // of (serve as adapters from [`AsyncWrite`] to [`AsyncRead`]):
+                .map(|(shard_idx, node_url, shard_spec)| {
+                    let (writer, reader) = async_io::duplex(64 * 1024);
+                    (shard_idx, node_url, writer, reader, shard_spec)
+                })
+                .map(|(shard_idx, node_url, writer, reader, shard_spec)| {
+                    // Parse the hex-encoded SHA3-256 digest. This may fail, which
+                    // is why we do it last. This returns a Result which we should
+                    // be able to extract using collect:
+                    let mut digest = [0_u8; 32];
+                    hex::decode_to_slice(&shard_spec.digest, &mut digest)
+                        .map_err(|hex_decode_err| {
+                            log::error!(
+                                "Error while decoding hex-encoded SHA3-256 \
+				 shard digest \"{}\": {:?}",
+                                &shard_spec.digest,
+                                hex_decode_err,
+                            );
+
+                            MISC_ERR
+                        })
+                        .map(|()| {
+                            (
+                                (shard_idx, node_url, digest, "", writer),
+                                (shard_idx, reader),
+                            )
+                        })
+                }),
+            |iter| iter.unzip::<_, _, Vec<_>, Vec<_>>(),
+        )?;
+
+        let mut opt_shard_readers = Vec::with_capacity(
+            retrieval_map.code_ratio_data as usize + retrieval_map.code_ratio_parity as usize,
+        );
+        for (shard_idx, reader) in shard_readers.into_iter() {
+            while opt_shard_readers.len() < shard_idx {
+                opt_shard_readers.push(None);
+            }
+            opt_shard_readers.push(Some(reader));
+        }
+        while opt_shard_readers.len()
+            < retrieval_map.code_ratio_data as usize + retrieval_map.code_ratio_parity as usize
+        {
+            opt_shard_readers.push(None);
+        }
+
+        // Download the shards, streaming them into the passed [`DuplexStream`]s:
+        let download_fut = download_shards(&node_api_client, chunk_idx, shards_to_fetch);
+
+        // ...while simultaneously decoding them.
+        let decode_fut = decode_shards(
+            &mut async_reed_solomon,
+            opt_shard_readers,
+            &mut object_file,
+            chunk_idx,
+            chunk_size,
+        );
+
+        // Now, execute both:
+        let ((), ()) = futures::try_join!(download_fut, decode_fut)?;
+    }
+
+    // object_file.borrow_mut().shutdown().await.map_err(|e| AsyncReedSolomonError::IOError(e.kind()))?;
+
+    Ok(())
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Upload an object
     Upload(UploadCommand),
+
+    /// Download an object
+    Download(DownloadCommand),
 }
 
 #[derive(Parser)]
@@ -844,9 +1380,9 @@ async fn main() {
 
     // Handle each subcommand seperately:
     let ec: exitcode::ExitCode = match cli.command {
-        Commands::Upload(ref cmd) => upload_command(&cli, cmd),
+        Commands::Upload(ref cmd) => upload_command(&cli, cmd).await,
+        Commands::Download(ref cmd) => download_command(&cli, cmd).await,
     }
-    .await
     .map_or_else(|ec| ec, |()| exitcode::OK);
 
     // Exit with the appropriate exit code:
