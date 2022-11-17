@@ -26,16 +26,43 @@ fn div_ceil(a: u64, b: u64) -> u64 {
     (a + b - 1) / b
 }
 
-fn parse_url<S: AsRef<str>>(url: S, target_type: &'static str) -> Result<Url, exitcode::ExitCode> {
-    Url::parse(url.as_ref()).map_err(|parseerr| {
-        log::error!(
-            "Failed to parse the provided {} URL (\"{}\"): {:?}",
-            target_type,
-            url.as_ref(),
-            parseerr
-        );
-        MISC_ERR
-    })
+fn parse_url<S: AsRef<str>>(
+    url: S,
+    target_type: &'static str,
+) -> Result<(Url, bool), exitcode::ExitCode> {
+    // For now, the parsing logic is actually pretty simple. If the scheme is
+    // `decode`, assume `https` (the default). If the scheme is
+    // `decode+$SCHEME`, use `$SCHEME`.
+
+    // TODO: Can we get around allocating memory here? Fixing a Url's scheme
+    // after parsing using `Url::set_scheme` is utterly useless given that
+    // method's restrictions.
+    let (stripped_url, proto_override) =
+        if let Some(prefix_less) = url.as_ref().strip_prefix("decode://") {
+            (format!("https://{}", prefix_less), false)
+        } else if let Some(stripped) = url.as_ref().strip_prefix("decode+") {
+            (stripped.to_string(), true)
+        } else {
+            log::error!(
+                "Unable to parse provided {} URL (\"{}\"): invalid scheme, \
+		 should match ^decode(\\+.*)://",
+                target_type,
+                url.as_ref(),
+            );
+            return Err(MISC_ERR);
+        };
+
+    Url::parse(&stripped_url)
+        .map(|url| (url, proto_override))
+        .map_err(|parseerr| {
+            log::error!(
+                "Failed to parse the provided {} URL (\"{}\"): {:?}",
+                target_type,
+                url.as_ref(),
+                parseerr
+            );
+            MISC_ERR
+        })
 }
 
 #[derive(Parser)]
@@ -465,10 +492,10 @@ async fn upload_chunk(
 
 async fn upload_command(cli: &Cli, cmd: &UploadCommand) -> Result<(), exitcode::ExitCode> {
     // Try to parse the passed coordinator base URL:
-    let parsed_url = parse_url(&cmd.coord_url, "coordinator")?;
+    let (parsed_url, proto_override) = parse_url(&cmd.coord_url, "coordinator")?;
 
     // Create the coordinator API client:
-    let coord_api_client = CoordAPIClient::new(parsed_url);
+    let coord_api_client = CoordAPIClient::new(parsed_url.clone());
 
     // In order to initiate an upload at the coordinator, we need to stat the
     // object size we are going to upload. However, as the documentation of
@@ -630,6 +657,12 @@ async fn upload_command(cli: &Cli, cmd: &UploadCommand) -> Result<(), exitcode::
         );
     }
 
+    // Compute the object URL just before moving the upload_map in the finalize
+    // API call:
+    let mut res_url = parsed_url;
+    // TODO: how to deal with subdirectories?
+    res_url.set_path(&upload_map.object_id.to_string());
+
     coord_api_client
         .finalize_object(upload_map, upload_receipts)
         .await
@@ -640,6 +673,15 @@ async fn upload_command(cli: &Cli, cmd: &UploadCommand) -> Result<(), exitcode::
             );
             MISC_ERR
         })?;
+
+    if proto_override {
+        println!("decode+{}", res_url.to_string());
+    } else {
+        println!(
+            "decode{}",
+            res_url.to_string().strip_prefix(res_url.scheme()).unwrap()
+        );
+    }
 
     Ok(())
 }
