@@ -339,6 +339,30 @@ impl AsyncReedSolomon {
     }
 }
 
+async fn assert_offset(
+    target_offset: u64,
+    file: &mut (impl async_io::AsyncSeekExt + Unpin),
+) -> Result<(), exitcode::ExitCode> {
+    let current_offset = async_io::AsyncSeekExt::seek(file, async_io::SeekFrom::Current(0))
+        .await
+        .map_err(|ioerr| {
+            log::error!(
+                "Error while seeking in file to recover current offset: {:?}",
+                ioerr
+            );
+            MISC_ERR
+        })?;
+
+    if current_offset != target_offset {
+        panic!(
+            "Unexpected offset in file, expected: {}, actual: {}",
+            target_offset, current_offset
+        );
+    }
+
+    Ok(())
+}
+
 async fn upload_chunk(
     _cli: &Cli,
     node_api_client: &NodeAPIClient,
@@ -363,24 +387,7 @@ async fn upload_chunk(
     // correctly implemented. However, when enabling debug output or running on
     // a debug build, recover the current file offset and print it nonetheless:
     if cfg!(debug_assertions) {
-        let current_offset =
-            async_io::AsyncSeekExt::seek(object_file, async_io::SeekFrom::Current(0))
-                .await
-                .map_err(|ioerr| {
-                    log::error!(
-                        "Error while seeking in file to recover current offset: {:?}",
-                        ioerr
-                    );
-                    MISC_ERR
-                })?;
-
-        if current_offset != upload_map.chunk_size * chunk_idx as u64 {
-            panic!(
-                "Unexpected offset in file, expected: {}, actual: {}",
-                upload_map.chunk_size * chunk_idx as u64,
-                current_offset
-            );
-        }
+        assert_offset(upload_map.chunk_size * chunk_idx as u64, object_file).await?;
     }
 
     async fn upload_shards(
