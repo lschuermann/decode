@@ -67,10 +67,10 @@ fn parse_url<S: AsRef<str>>(
 
 #[derive(Parser)]
 struct UploadCommand {
-    // Base URL of coordiator:
+    /// Base URL of coordiator (decode://<hostname>)
     coord_url: String,
 
-    // Path of object to upload:
+    /// Object file to upload
     object_path: String,
 }
 
