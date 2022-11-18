@@ -191,8 +191,7 @@ def node_register(node_id):
     # Verify other fields, e.g., list of shard hashes
 
     node_url = body['node_url']
-    
-    shards = set([i.encode() for i in body['shards']])
+    shards = set([bytes(bytearray.fromhex(i)) for i in body['shards']])
     shard_node_map.remove_node(node_id)
     shard_node_map.add_node(node_id, node_url, shards)
 
@@ -283,11 +282,12 @@ def retrieve_object(objectID):
             nodemap_index = []
             nodes = shard_node_map.get_shard_nodes(digest)
             for node in nodes:
+                node_url = node_map[node]
                 try:
-                    index = node_map.index(node)
+                    index = node_map.index(node_url)
                     nodemap_index.append(index)
                 except:
-                    node_map.append(node)
+                    node_map.append(node_url)
                     nodemap_index.append(len(node_map) - 1)                    
             one_chunk.append({"digest": digest.decode(), "nodes": nodemap_index})
         all_chunks.append(one_chunk)
