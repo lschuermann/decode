@@ -33,7 +33,10 @@ impl<'a, T, I: AsRef<[T]> + AsMut<[T]> + 'a, O: AsRef<[I]> + AsMut<[I]> + 'a>
     // even `&mut [Vec<T>]` into a 2D mutable slice, that won't be very
     // practical. Hence we provide a few methods which work around these issues,
     // such as collecting an `Iterator<Item = T>` into this structure:
-    pub fn collect_iter(&mut self, iter: &mut impl Iterator<Item = T>) -> (usize, bool) {
+    pub fn collect_iter(
+        &mut self,
+        iter: &mut impl Iterator<Item = T>,
+    ) -> (usize, bool, usize, usize) {
         let rows = self.slices.as_ref().len();
 
         let mut row_offset = 0;
@@ -67,7 +70,7 @@ impl<'a, T, I: AsRef<[T]> + AsMut<[T]> + 'a, O: AsRef<[I]> + AsMut<[I]> + 'a>
             }
         }
 
-        (items, iter_exhausted)
+        (items, iter_exhausted, row_offset, column_offset)
     }
 }
 

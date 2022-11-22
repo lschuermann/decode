@@ -72,7 +72,7 @@ impl AsyncReedSolomon {
         &mut self,
         mut reader: BR,
         limit: usize,
-    ) -> Result<(usize, usize), AsyncReedSolomonError> {
+    ) -> Result<(usize, usize, usize), AsyncReedSolomonError> {
         log::trace!("Reading data into interspersed buffers, limit: {}", limit);
         let data_shards = self.rs.data_shard_count();
 
@@ -113,44 +113,36 @@ impl AsyncReedSolomon {
         // reallocate on the fly:
         self.input_buffers.iter_mut().for_each(|vec| {
             // Ceiling division, to ensure we have enough space for the last
-            // partial column:
+            // partial column. We don't care about any existing contents in this
+            // vector:
             vec.resize((data_len + data_shards - 1) / data_shards, 0);
         });
 
-        // Now actually copy the data:
-        let mut column = 0;
-        let mut shard = 0;
-        for byte in self.interspersed_buffer[..data_len].iter() {
-            // Insert the byte into the appropriate shard:
-            self.input_buffers[shard][column] = *byte;
+        // Now, use a TransposedSlices view over the data slices to be able to
+        // collect the linear read iterator:
+        let (bytes_written, _iter_exhausted, row_offset, mut column_offset) =
+            transposed_slices::TransposedSlices::new(
+                &mut self.input_buffers[..self.rs.data_shard_count()],
+            )
+            .collect_iter(&mut self.interspersed_buffer.iter().copied().take(data_len));
 
-            // Increment the shard, switch to the next column once all shards of
-            // the current have been filled:
-            shard += 1;
-            if shard >= data_shards {
-                shard = 0;
-                column += 1;
+        // Given that we've allocated enough space in the transposed slices, and
+        // have `data_len` source bytes, we must also write `data_len` bytes:
+        assert!(data_len == bytes_written);
+
+        // Now, it may be the case that we've started to write a column but
+        // didn't finish (row_offset != 0). In this case, pad the rest of the
+        // column with zero elements:
+        let mut pad_bytes = 0;
+        if row_offset != 0 {
+            for row in row_offset..self.rs.data_shard_count() {
+                self.input_buffers[row][column_offset] = 0;
             }
+            column_offset += 1;
+            pad_bytes = self.rs.data_shard_count() - row_offset;
         }
 
-        // If we've started writing a partial column (shard != 0), pad it with
-        // zeroes:
-        if shard != 0 {
-            for s in shard..data_shards {
-                self.input_buffers[s][column] = 0;
-            }
-            column += 1;
-        }
-
-        log::trace!(
-            "Interspersing data has resulted in {} columns and {} rows of \
-	     which {} have been padded with a zero element.",
-            column,
-            data_shards,
-            (data_shards - shard) % data_shards
-        );
-
-        Ok((data_len, column))
+        Ok((data_len, pad_bytes, column_offset))
     }
 
     pub async fn write_interspersed_data<
@@ -233,14 +225,14 @@ impl AsyncReedSolomon {
                 // Limit to length:
                 len - processed,
             );
-            let (read_bytes, written_columns) = self
+            let (read_bytes, pad_bytes, written_columns) = self
                 .read_interspersed_data::<R, &mut R>(reader.borrow_mut(), read_limit)
                 .await?;
 
-            // Sanity check to ensure that we haven't padded (except when we are
-            // approaching the file limit, were it's fine for us to pad:
-            let max_read_bytes = written_columns * self.rs.data_shard_count();
-            if read_bytes != max_read_bytes && processed + read_bytes != len {
+            // Sanity check to ensure that we haven't padded with zeros (except
+            // when we are approaching the file limit, were it's fine but not
+            // always necessary for us to pad):
+            if pad_bytes != 0 && processed + read_bytes != len {
                 return Err(AsyncReedSolomonError::UnexpectedEof);
             }
 
