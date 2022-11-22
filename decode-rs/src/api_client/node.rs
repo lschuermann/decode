@@ -157,12 +157,13 @@ impl NodeAPIClient {
         }
     }
 
+    // TODO: document. This does not shut down the writer!
     pub async fn download_shard(
         &self,
         base_url: impl Borrow<reqwest::Url>,
-        object_id: impl AsRef<[u8; 32]>,
+        shard_digest: impl AsRef<[u8; 32]>,
         ticket: impl AsRef<str>,
-        mut writer: impl AsyncWrite + AsyncWriteExt + Unpin + Send + Sync + 'static,
+        mut writer: impl AsyncWrite + AsyncWriteExt + Unpin,
     ) -> Result<(), NodeAPIDownloadError> {
         let mut resp_stream = self
             .http_client
@@ -170,7 +171,7 @@ impl NodeAPIClient {
                 base_url
                     .borrow()
                     .join("/v0/shard/")
-                    .and_then(|url| url.join(&hex::encode(object_id.as_ref())))
+                    .and_then(|url| url.join(&hex::encode(shard_digest.as_ref())))
                     .expect("Failed to construct shard retrieval URL"),
             )
             .header(

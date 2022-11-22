@@ -30,6 +30,7 @@ mod pipe_through_hasher;
 mod shard_store;
 
 use decode_rs::api::node as node_api;
+use decode_rs::api_client::node as node_api_client;
 
 /// Parsed and validated node server configuration, along with other
 /// shared state and instances:
@@ -43,12 +44,6 @@ struct NodeServerState {
 
 struct HexDigest<const N: usize> {
     digest: [u8; N],
-}
-
-impl<const N: usize> HexDigest<N> {
-    fn get_digest(&self) -> &[u8; N] {
-        &self.digest
-    }
 }
 
 impl<'r, const N: usize> FromParam<'r> for HexDigest<N> {
@@ -66,6 +61,12 @@ impl<'r, const N: usize> FromParam<'r> for HexDigest<N> {
     }
 }
 
+impl<const N: usize> AsRef<[u8; N]> for HexDigest<N> {
+    fn as_ref(&self) -> &[u8; N] {
+        &self.digest
+    }
+}
+
 struct ShardResponse<'a, const N: usize>(shard_store::Shard<'a, N>);
 impl<'r, 'a: 'r, const N: usize> Responder<'r, 'a> for ShardResponse<'a, N> {
     fn respond_to(self, _req: &'r Request<'_>) -> response::Result<'a> {
@@ -73,6 +74,104 @@ impl<'r, 'a: 'r, const N: usize> Responder<'r, 'a> for ShardResponse<'a, N> {
             .header(ContentType::Binary)
             .streamed_body(self.0)
             .ok()
+    }
+}
+
+#[post("/shard/<shard_digest>/fetch", data = "<fetch_info>")]
+async fn fetch_shard<'a>(
+    shard_digest: HexDigest<32>,
+    state: &State<NodeServerState>,
+    fetch_info: Json<node_api::ShardFetchRequest<'a>>,
+) -> Result<(), error::APIError> {
+    use tokio::io::AsyncWriteExt;
+
+    let source_node_url = reqwest::Url::parse(&fetch_info.source_node).map_err(|err| {
+        // TODO: proper error handling!
+        log::error!(
+            "Failed to parse the provided source node URL (\"{}\"): {:?}",
+            fetch_info.source_node,
+            err
+        );
+        error::APIError::InternalServerError
+    })?;
+
+    let node_client = node_api_client::NodeAPIClient::new();
+
+    let mut insertion_shard = state
+        .shard_store
+        .insert_shard_by_writer()
+        .await
+        .map_err(|err| {
+            log::error!("Failed to acquire insertion shard: {:?}", err);
+            error::APIError::InternalServerError
+        })?;
+
+    // Instantiate a PipeThroughHasher to calculate a checksum for the
+    // streamed data.
+    let mut pipethroughhasher =
+        pipe_through_hasher::PipeThroughHasher::new(insertion_shard.as_async_writer());
+
+    // Request the shard from the passed source node, piping it into
+    // the insertion shard and through the pipe through hasher:
+    node_client
+        .download_shard(
+            &source_node_url,
+            &shard_digest,
+            &fetch_info.ticket,
+            &mut pipethroughhasher,
+        )
+        .await
+        .map_err(|err| {
+            // TODO: proper error handling!
+            log::error!(
+                "Error while fetching shard {:x?} from remote node at \"{}\": {:?}",
+                AsRef::<[u8; 32]>::as_ref(&shard_digest),
+                &fetch_info.source_node,
+                err
+            );
+            error::APIError::InternalServerError
+        })?;
+
+    // Shutdown the stream, which will also flush to the file:
+    pipethroughhasher.shutdown().await.map_err(|err| {
+        log::error!(
+            "Failed to shutdown the pipe-through hasher writer: {:?}",
+            err
+        );
+        error::APIError::InternalServerError
+    })?;
+
+    // Retrieve the digest from the hasher, which will consume it.
+    let calculated_digest = pipethroughhasher.get_digest().map_err(|err| {
+        log::error!(
+            "Failed to retrieve the shard digest from the pipe-through hasher: {:?}",
+            err
+        );
+        error::APIError::InternalServerError
+    })?;
+
+    if calculated_digest != *shard_digest.as_ref() {
+        // Mismatch between the requested digest and received data,
+        // this is bad! Reject the shard and respond with an error:
+        insertion_shard.abort().await.map_err(|err| {
+            log::error!("Error occured while aborting an InsertionShard: {:?}", err);
+            error::APIError::InternalServerError
+        })?;
+
+        // TODO: repond with a proper error
+        Err(error::APIError::InternalServerError)
+    } else {
+        // Finalize the inserted shard:
+        insertion_shard
+            .finalize(&calculated_digest)
+            .await
+            .map_err(|err| {
+                log::error!("Failed finalizing insertion of chunk: {:?}", err);
+                error::APIError::InternalServerError
+            })?;
+
+        // Everything worked, respond with 200 OK
+        Ok(())
     }
 }
 
@@ -84,7 +183,7 @@ async fn get_shard<'a>(
     // Try to retrieve the requested shard from the shard store:
     let shard = state
         .shard_store
-        .get_shard(shard_digest.get_digest())
+        .get_shard(shard_digest.as_ref())
         .await
         .map_err(|err| match err.kind() {
             IOErrorKind::NotFound => error::APIError::ResourceNotFound,
@@ -312,7 +411,10 @@ async fn rocket() -> _ {
         // that we return JSON errors here (although this is not
         // specified under any contract and entirely arbitrary)
         .register("/", error::get_catchers())
-        .mount("/v0/", routes![get_shard, post_shard, get_statistics])
+        .mount(
+            "/v0/",
+            routes![get_shard, post_shard, fetch_shard, get_statistics,],
+        )
         .manage(node_server_state)
         .attach(AdHoc::config::<config::NodeServerConfigInterface>())
 }

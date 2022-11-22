@@ -284,3 +284,15 @@ pub struct NodeStatistics {
     pub cpu_usage: u64,
     pub disk_usage: u64,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShardFetchRequest<'a> {
+    /// Node URL to fetch this shard from
+    #[serde(borrow)]
+    pub source_node: Cow<'a, str>,
+
+    /// Ticket to present the node to fetch the shard from (download
+    /// authorization)
+    #[serde(borrow)]
+    pub ticket: Cow<'a, str>,
+}

@@ -59,6 +59,40 @@ paths:
                 type: string
                 format: binary
 
+  /shard/{shardDigest}/fetch:
+    post:
+      summary: Fetch a shard from another node
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: shardDigest
+          in: path
+          required: true
+          description: Hex-encoded SHA3-256 digest of shard
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - source_node
+              - ticket
+              properties:
+                source_node:
+                  type: string
+                  description: Base-URL of node to fetch shard from
+                ticket:
+                  type: string
+                  description: |
+                    Ticket authorizing this node to act as a client
+                    towards the source node and fetch the requested
+                    shard.
+      responses:
+        '200':
+          description: Shard replicated on this node successfully
+
 components:
   schemas:
     ShardInfo:
