@@ -282,7 +282,7 @@ def retrieve_object(objectID):
             nodemap_index = []
             nodes = shard_node_map.get_shard_nodes(digest)
             for node in nodes:
-                node_url = node_map[node]
+                node_url = shard_node_map.node_map[node].url
                 try:
                     index = node_map.index(node_url)
                     nodemap_index.append(index)
