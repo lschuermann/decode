@@ -201,7 +201,6 @@ components:
               required:
                 - digest
                 - nodes
-                - ticket
               properties:
                 digest:
                   type: string
@@ -211,9 +210,6 @@ components:
                   items:
                     type: integer
                     description: NodeMap index
-                ticket:
-                  type: string
-                  description: Authorization ticket for node storing shards
         node_map:
           type: array
           items:

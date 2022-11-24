@@ -102,7 +102,7 @@ class NodeStatus:
             # Node is down
             if self.report_miss == report_miss_before_down:
                 self.timer.cancel()
-                down_node_handling(self.shards)
+                reconstruct_shards(self.shards)
                 del shard_node_map.nodemap[self.node_id]
                 # remove node from map
             pass
@@ -118,9 +118,10 @@ class NodeStatus:
         self.timer = threading.Timer(liveness_report_period, self.liveness_request)
         self.timer.start()
 
-def down_node_handling(shards):
+def reconstruct_shards(shards):
     for shard in shards:
-        excluded_nodes = []
+        node_map = []
+        excluded_nodes_id = []
         object_chunk_query = db.session.query(Shard).filter_by(shard_hash = shard)
         object_id = object_chunk_query[0].object_id
         chunk_index = object_chunk_query[0].chunk_index
@@ -131,31 +132,49 @@ def down_node_handling(shards):
             if shard_query.shard_hash == shard:
                 construct_shard_map.append({None})
                 continue
-            stored_node = shard_node_map.get_shard_nodes(shard_query.shard_hash)
+            nodemap_index = []
+            nodes = shard_node_map.get_shard_nodes(shard_query.shard_hash)
+            for node in nodes:
+                excluded_nodes_id += node
+                node_url = shard_node_map.node_map[node].url
+                try:
+                    index = node_map.index(node_url)
+                    nodemap_index.append(index)
+                except:
+                    node_map.append(node_url)
+                    nodemap_index.append(len(node_map) - 1)     
             construct_shard_map.append({
-                'digest': shard_query.shard_hash,
-                'nodes': stored_node,
-                'ticket': 'TICKET'})
-            excluded_nodes += stored_node
+                'digest': shard_query.shard_hash.hex(),
+                'nodes': nodemap_index})
+            
         # The node this reconstruction should take place
-        node = place_shards(1, excluded_nodes, object_query[0].shard_size)[0] 
+        node = place_shards(1, excluded_nodes_id, object_query[0].shard_size)[0] 
+        payload = {
+            "chunk_size": object_query[0].chunk_size,
+            "shard_size": object_query[0].shard_size,
+            "code_ratio_data": object_query[0].code_ratio_data,
+            "code_ratio_parity": object_query[0].code_ratio_parity,
+            "shard_map": construct_shard_map,
+            "node_map": node_map
+        }
         # send the reconstruction request
+        response = requests.post(node + '/' + shard.hex() + "/reconstruct", data = payload)
 
-
-def place_shards(number_shards, excluded_nodes, shard_size):
+def place_shards(number_shards, excluded_nodes_id, shard_size):
     nodes = []
-    for _ in range(number_shards + parity_shards):
-        node_id, node_url = place_shard(excluded_nodes, shard_size)
-        excluded_nodes.append(node_id)
+    for _ in range(number_shards):
+        node_id, node_url = place_shard(excluded_nodes_id, shard_size)
+        excluded_nodes_id.append(node_id)
         nodes.append(node_url)
     return nodes
 
 # Selection algorithm 
-def place_shard(excluded_nodes, shard_size):
+def place_shard(excluded_nodes_id, shard_size):
     while(1):
         item = shard_node_map.nodemap.random_item()
-        # if item.key not in excluded_nodes and item.value.disk_usage > shard_size:
-        return item[0], item[1].url
+        if item.key not in excluded_nodes_id:
+        # and item.value.disk_usage > shard_size:
+            return item[0], item[1].url
     
 
 @app.route("/")
@@ -211,7 +230,7 @@ def upload_object():
     uuid_file = uuid.uuid4() #PLACEHOLDER for now
     for _ in range(num_chunck):
         chunk = []
-        nodes = place_shards(num_data_shards, [], size_shard) 
+        nodes = place_shards(num_data_shards + parity_shards, [], size_shard) 
         for node in nodes:
             chunk.append({
                         "ticket": "RANDOM_TICKET" ,
@@ -289,7 +308,7 @@ def retrieve_object(objectID):
                 except:
                     node_map.append(node_url)
                     nodemap_index.append(len(node_map) - 1)                    
-            one_chunk.append({"digest": digest.decode(), "nodes": nodemap_index})
+            one_chunk.append({"digest": digest.hex(), "nodes": nodemap_index})
         all_chunks.append(one_chunk)
 
     return {
