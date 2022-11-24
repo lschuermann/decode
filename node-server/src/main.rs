@@ -667,7 +667,7 @@ async fn post_shard(
         Ok(Json(node_api::ShardUploadReceipt {
             digest: Cow::Owned(hex::encode(&digest)),
             // TODO: generate an actual receipt
-            receipt: Cow::Borrowed("dummy_receipt"),
+            receipt: Cow::Owned(state.node_id.to_string()),
         }))
     }
 }
