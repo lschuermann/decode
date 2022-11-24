@@ -19,6 +19,13 @@ pub struct NodeServerConfigInterface {
     // Use a subdirectory in the local directory as default storage
     // path for shards:
     pub shards_path: String,
+
+    // How often the node should try to reconstruct a shard before
+    // giving up on a reconstruct request. This does not count towards
+    // failures of nodes of serve a shard at all (e.g. by sending a
+    // 404), but for cases in which nodes don't respond or interrupt a
+    // transfer after it was initiated with a 200 OK response.
+    pub reconstruct_retries: usize,
 }
 
 impl Default for NodeServerConfigInterface {
@@ -29,6 +36,7 @@ impl Default for NodeServerConfigInterface {
             preshared_key: None,
             coordinator_url: None,
             shards_path: "./shards".to_string(),
+            reconstruct_retries: 2,
         }
     }
 }

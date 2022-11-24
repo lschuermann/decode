@@ -6,6 +6,8 @@ use log;
 use serde::{Deserialize, Serialize};
 use serde_json;
 
+use super::coord as coord_api;
+
 /// Hard-coded JSON-encoded fallback error for when the encoding of
 /// [`APIError`] fails.
 const FALLBACK_API_ERROR: &'static str = "{\
@@ -277,6 +279,49 @@ impl<'digest, 'receipt, 'desc, 'resp_body>
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ShardRetrievalError<'desc, 'resp_body>(pub APIError<'desc, 'resp_body>);
+
+impl<'desc, 'resp_body> ShardRetrievalError<'desc, 'resp_body> {
+    pub fn from_bytes<'a: 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
+        serde_json::from_slice::<'a, APIError<'a, 'a>>(bytes)
+            .map(ShardRetrievalError)
+            .unwrap_or_else(|_| {
+                ShardRetrievalError(APIError::InvalidResponse {
+                    status: None,
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            })
+    }
+
+    pub fn from_http_resp<'a: 'desc + 'resp_body>(status: NonZeroU16, bytes: &'a [u8]) -> Self {
+        // Use the regular `from_bytes` to parse:
+        let mut parsed = Self::from_bytes(bytes);
+
+        if let Some(expected_status_code) = parsed.0.http_status_code() {
+            if expected_status_code != status {
+                ShardRetrievalError(APIError::InvalidResponse {
+                    status: Some(status),
+                    resp_body: Some(ResponseBody(Cow::Borrowed(bytes))),
+                })
+            } else {
+                // Parsing worked, code matches
+                parsed
+            }
+        } else {
+            // Parsing did not yield an error with an expected status, pass the
+            // parsed result (which likely is a [`APIError::InvalidResponse`])
+            // through and set the actual received status:
+            parsed.0.set_invalid_response_status_code(status);
+            parsed
+        }
+    }
+
+    pub fn into_owned(self) -> ShardRetrievalError<'static, 'static> {
+        ShardRetrievalError(self.0.into_owned())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatistics {
     // Dummy fields
@@ -298,4 +343,43 @@ pub struct ShardFetchRequest<'a> {
     /// authorization)
     #[serde(borrow)]
     pub ticket: Cow<'a, str>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShardReconstructRequest {
+    /// Size of the entire object in bytes
+    pub chunk_size: u64,
+
+    /// The number of shards in a chunk can be calculated as
+    ///
+    ///     shard_count = ceil(chunk_size / shard_size)
+    ///
+    /// . Shards are evenly distributed over a chunk, and the
+    /// start address of a shard `i` can be calculated as
+    ///
+    ///     shard_start = i * shard_size
+    ///
+    /// . In case `chunk_size` is not evenly divisible by `shard_size`,
+    /// the last shard may be smaller than `shard_size`, its size can
+    /// be calculated as `chunk_size mod shard_size`. For purposes of
+    /// parity shard calculation and reconstruction, the last chunk is to
+    /// be padded to the full `shard_size` with null-bytes.
+    pub shard_size: u64,
+
+    // Reed-Solomon Code Parameters:
+    /// Number of Reed-Solomon data shards of every chunk
+    ///
+    /// Must be equal to `ceil(chunk_size / shard_size)`.
+    pub code_ratio_data: u8,
+    /// Number of Reed-Solomon parity shards of every chunk
+    ///
+    /// All parity shards are `shard_size` in length.
+    pub code_ratio_parity: u8,
+
+    /// Mapping from shards to digests and node indices:
+    pub shard_map: Vec<coord_api::ObjectRetrievalShardSpec>,
+
+    /// Mapping from node indices to node base URLs (excluding the /v0
+    /// API version subpath):
+    pub node_map: Vec<String>,
 }

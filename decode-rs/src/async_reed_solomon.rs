@@ -121,7 +121,7 @@ impl AsyncReedSolomon {
         // Now, use a TransposedSlices view over the data slices to be able to
         // collect the linear read iterator:
         let (bytes_written, _iter_exhausted, row_offset, mut column_offset) =
-            transposed_slices::TransposedSlices::new(
+            transposed_slices::TransposedSlices::<'_, u8, Vec<u8>, &mut [Vec<u8>]>::new(
                 &mut self.input_buffers[..self.rs.data_shard_count()],
             )
             .collect_iter(&mut self.interspersed_buffer.iter().copied().take(data_len));
@@ -300,6 +300,208 @@ impl AsyncReedSolomon {
         Ok(())
     }
 
+    pub async fn reconstruct_shards<
+        R: AsyncRead + AsyncReadExt + Unpin,
+        BR: BorrowMut<R>,
+        W: AsyncWrite + AsyncWriteExt + Unpin,
+        BW: BorrowMut<W>,
+    >(
+        &mut self,
+        readers: &mut [Option<BR>],
+        writers: &mut [Option<BW>],
+        len: Option<usize>,
+    ) -> Result<(), AsyncReedSolomonError> {
+        // Basic sanity check: we can't recunstruct any data if we don't have at
+        // least as many readers as data shards. Also, the length of the readers
+        // list should be equal to the number of data and parity shards, as we
+        // use the index of readers for the shard index:
+        let reader_count = readers.iter().filter(|r| r.is_some()).count();
+        if readers.len() != self.rs.data_shard_count() + self.rs.parity_shard_count()
+            || reader_count != self.rs.data_shard_count()
+        {
+            return Err(AsyncReedSolomonError::MissingReadersWriters);
+        }
+
+        // Check if we are instructed to only reconstruct data shards. In this
+        // case, we can actually save a few allocations:
+        let only_reconstruct_data = writers
+            .iter()
+            .enumerate()
+            .find(|(i, w)| w.is_some() && *i >= self.rs.data_shard_count())
+            .is_none();
+
+        // Ensure that all row buffers for which we have a reader or a writer
+        // supplied have sufficient length to reconstruct at most a single burst
+        // at a time. For this, clear and then reserve the required space (we're
+        // clearing the contents on writing them once per iteration anyways).
+        self.input_buffers
+            .iter_mut()
+            .zip(readers.iter())
+            .enumerate()
+            .filter(|(i, (_b, r))| {
+                if only_reconstruct_data {
+                    r.is_some() || *i < self.rs.data_shard_count()
+                } else {
+                    true
+                }
+            })
+            .for_each(|(_i, (b, _r))| {
+                b.clear();
+                b.resize(self.burst_len, 0);
+            });
+
+        // Reconstruct from bursts of reads until we've reconstructed `len`
+        // bytes of data. The loop can further abort when we've hit an Eof for
+        // cases in which the length isn't specified.
+        let mut reconstructed: usize = 0;
+        while reconstructed < len.unwrap_or(usize::MAX) {
+            // Determine the remaining read length (limited to that of a single
+            // burst per row) on a per-reader granularity and then issue the
+            // reads simutaneously:
+            let read_row_bytes_limit =
+		// Ceiling division:
+		(
+		    std::cmp::min(len.unwrap_or(usize::MAX) - reconstructed, self.burst_len)
+			+ self.rs.data_shard_count()
+			- 1
+		) / self.rs.data_shard_count();
+
+            let read_results: Vec<Result<usize, std::io::Error>> = futures::future::join_all(
+                self.input_buffers
+                    .iter_mut()
+                    .zip(readers.iter_mut())
+                    .filter_map(|(buffer, opt_reader)| {
+                        opt_reader.as_mut().map(|reader| (buffer, reader))
+                    })
+                    .map(|(buffer, reader)| async move {
+                        // Read until encouting an end-of-file or filling up the
+                        // pre-sliced buffer:
+                        let mut progress = 0;
+                        while progress < read_row_bytes_limit {
+                            let read_bytes = reader
+                                .borrow_mut()
+                                .read(&mut buffer[progress..read_row_bytes_limit])
+                                .await?;
+                            progress += read_bytes;
+                            if progress == 0 {
+                                break;
+                            }
+                        }
+                        Ok(progress)
+                    }),
+            )
+            .await;
+
+            // Iterate over the read results, reporting the first error we can
+            // find. [`AsyncReadExt::read_exact`] is specified to return an
+            // error of [`io::ErrorKind::UnexpectedEof`] if it can't fill the
+            // entire buffer, hence we can ignore the returned usize length.
+            let read_row_bytes: usize = read_results
+                .iter()
+                .fold(
+                    Ok(None),
+                    |acc: Result<Option<usize>, AsyncReedSolomonError>, elem| {
+                        match (elem, acc) {
+                            (Err(ioerr), _) => Err(AsyncReedSolomonError::IOError(ioerr.kind())),
+                            (_, Err(async_rs_err)) => Err(async_rs_err),
+                            (Ok(read_row_bytes), Ok(prev_bytes_opt)) => {
+                                // The success case is a little tricky. Depending on
+                                // whether the `len` parameter passed to this
+                                // function is `Some()`, we want to make it a hard
+                                // error if we couldn't read sufficient
+                                // data. However, we further want to make it a hard
+                                // error if we did encounter an Eof, but we've
+                                // managed to read ahead one stream.
+                                //
+                                // This translated into the follwing checks. In any
+                                // case, all read rows must be of the same
+                                // length. If we already have a length set in the
+                                // accumulator, compare it:
+                                if let Some(prev_bytes) = prev_bytes_opt {
+                                    if prev_bytes != *read_row_bytes {
+                                        return Err(AsyncReedSolomonError::UnexpectedEof);
+                                    }
+                                }
+
+                                // In any case, if we have a target length, ensure
+                                // that we read the required number of columns to
+                                // reconstruct that:
+                                if len.is_some() {
+                                    // Ensure that we got exactly the desired length
+                                    // (overshooting should be prevented by limiting
+                                    // the buffer):
+                                    if *read_row_bytes != read_row_bytes_limit {
+                                        return Err(AsyncReedSolomonError::UnexpectedEof);
+                                    }
+                                }
+
+                                // If the checks passed, forward the read bytes into
+                                // the accumulator:
+                                Ok(Some(*read_row_bytes))
+                            }
+                        }
+                    },
+                )?
+                // Unwrap must succeed if we have read at least one shard, which
+                // should be enforced above:
+                .unwrap();
+
+            // Subslice the buffers, returning a data structure whose format is
+            // compatible with what [`ReedSolomon::reconstruct_data`]
+            // expects. This is required as we need to limit the length of each
+            // buffer to the actual number of data rows we've read:
+            let mut limited_buffers: Vec<(&mut [u8], bool)> = self
+                .input_buffers
+                .iter_mut()
+                .zip(readers.iter())
+                .enumerate()
+                .map(|(i, (b, r))| {
+                    if r.is_some() {
+                        (&mut b[..read_row_bytes_limit], true)
+                    } else if only_reconstruct_data && i >= self.rs.data_shard_count() {
+                        // Don't actually slice any memory, this shard must not
+                        // be relevant to the Reed Solomon reconstruction
+                        // because we don't have it, and it is not one of the
+                        // data shards to be reconstructed.
+                        (&mut b[..0], false)
+                    } else {
+                        (&mut b[..read_row_bytes_limit], false)
+                    }
+                })
+                .collect();
+
+            // Run the routine for reconstructing shards, depending on which
+            // shards we'd like to reconstruct:
+            if only_reconstruct_data {
+                self.rs
+                    .reconstruct_data(&mut limited_buffers)
+                    .map_err(AsyncReedSolomonError::ReedSolomonError)?;
+            } else {
+                self.rs
+                    .reconstruct(&mut limited_buffers)
+                    .map_err(AsyncReedSolomonError::ReedSolomonError)?;
+            }
+
+            // Now, write the reconstructed rows into the writers:
+            futures::future::join_all(
+                writers
+                    .iter_mut()
+                    .zip(limited_buffers)
+                    .filter_map(|(w, b)| w.as_mut().map(|writer| (writer, b)))
+                    .map(|(writer, (buffer, _valid))| writer.borrow_mut().write_all(buffer)),
+            )
+            .await
+            .into_iter()
+            .collect::<Result<Vec<()>, io::Error>>()
+            .map_err(|ioerr| AsyncReedSolomonError::IOError(ioerr.kind()))?;
+
+            reconstructed += read_row_bytes * self.rs.data_shard_count();
+        }
+
+        Ok(())
+    }
+
+    // TODO: rewrite this to use reconstruct_shards underneath
     pub async fn reconstruct_data<
         R: AsyncRead + AsyncReadExt + Unpin,
         BR: BorrowMut<R>,
@@ -344,10 +546,13 @@ impl AsyncReedSolomon {
         while reconstructed < len {
             // Determine the remaining read length on a per-reader granularity
             // and then issue the reads simutaneously:
-            let read_columns = (std::cmp::min(len - reconstructed, self.burst_len)
-                + self.rs.data_shard_count()
-                - 1)
-                / self.rs.data_shard_count();
+            let read_columns =
+		// Ceiling division:
+		(
+		    std::cmp::min(len - reconstructed, self.burst_len)
+			+ self.rs.data_shard_count()
+			- 1
+		) / self.rs.data_shard_count();
 
             // Subslice the buffers once, returning a data structure whose
             // format is compatible with what [`ReedSolomon::reconstruct_data`]

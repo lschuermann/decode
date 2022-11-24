@@ -89,15 +89,11 @@ impl NodeAPIDownloadError {
         }
     }
 
-    // TODO: we should probably analze the content-type and status code to
-    // determine whether we need to interpret the response as a shard or an API
-    // error
-    //
-    // fn from_api_error<'desc, 'resp_body>(
-    //     apierr: node_api::APIError<'desc, 'resp_body>,
-    // ) -> NodeAPIDownloadError {
-    //     NodeAPIDownloadError::MiscError(NodeAPIClientError::APIError(apierr.into_owned()))
-    // }
+    fn from_api_error<'desc, 'resp_body>(
+        apierr: node_api::APIError<'desc, 'resp_body>,
+    ) -> NodeAPIDownloadError {
+        NodeAPIDownloadError::MiscError(NodeAPIClientError::APIError(apierr.into_owned()))
+    }
 }
 
 pub struct NodeAPIClient {
@@ -157,15 +153,16 @@ impl NodeAPIClient {
         }
     }
 
-    // TODO: document. This does not shut down the writer!
-    pub async fn download_shard(
+    pub async fn download_shard_req<'a>(
         &self,
         base_url: impl Borrow<reqwest::Url>,
         shard_digest: impl AsRef<[u8; 32]>,
         ticket: impl AsRef<str>,
-        mut writer: impl AsyncWrite + AsyncWriteExt + Unpin,
-    ) -> Result<(), NodeAPIDownloadError> {
-        let mut resp_stream = self
+    ) -> Result<
+        impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
+        NodeAPIDownloadError,
+    > {
+        let resp = self
             .http_client
             .get(
                 base_url
@@ -180,8 +177,34 @@ impl NodeAPIClient {
             )
             .send()
             .await
-            .map_err(NodeAPIDownloadError::from_reqwest_error)?
-            .bytes_stream();
+            .map_err(NodeAPIDownloadError::from_reqwest_error)?;
+
+        let status = NonZeroU16::new(resp.status().as_u16()).unwrap();
+        if status != NonZeroU16::new(200).unwrap() {
+            // Received some non-200 OK response, parse as error and return:
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(NodeAPIDownloadError::from_reqwest_error)?;
+            let parsed = node_api::ShardRetrievalError::from_http_resp(status, bytes.as_ref());
+            return Err(NodeAPIDownloadError::from_api_error(parsed.0));
+        } else {
+            // Status looks good, return the response body as a byte-stream:
+            Ok(resp.bytes_stream())
+        }
+    }
+
+    // TODO: document. This does not shut down the writer!
+    pub async fn download_shard(
+        &self,
+        base_url: impl Borrow<reqwest::Url>,
+        shard_digest: impl AsRef<[u8; 32]>,
+        ticket: impl AsRef<str>,
+        mut writer: impl AsyncWrite + AsyncWriteExt + Unpin,
+    ) -> Result<(), NodeAPIDownloadError> {
+        let mut resp_stream = self
+            .download_shard_req(base_url, shard_digest, ticket)
+            .await?;
 
         while let Some(item) = resp_stream.next().await {
             match item {
