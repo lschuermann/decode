@@ -295,6 +295,9 @@ async fn get_statistics() -> Json<node_api::NodeStatistics> {
         bandwidth: 42,
         cpu_usage: 0,
         disk_usage: 9001, // over 9000
+        load_avg: 0.5,
+        disk_capacity: 1099511627776,
+        disk_free: 549755813888,
     })
 }
 

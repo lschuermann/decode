@@ -283,6 +283,9 @@ pub struct NodeStatistics {
     pub bandwidth: u64,
     pub cpu_usage: u64,
     pub disk_usage: u64,
+    pub load_avg: f32,
+    pub disk_capacity: u64,
+    pub disk_free: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
