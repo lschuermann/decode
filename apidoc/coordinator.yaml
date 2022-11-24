@@ -80,6 +80,7 @@ paths:
                       required:
                         - digest
                         - receipt
+                        - node_id
                       properties:
                         digest:
                           type: string
@@ -87,6 +88,9 @@ paths:
                         receipt:
                           type: string
                           description: Receipt from uploading to node
+                        node_id:
+                          type: string
+                          description: UUID of node
                 object_upload_map:
                   $ref: "#/components/schemas/ObjectUploadMap"
       responses:
@@ -102,7 +106,7 @@ paths:
         - name: nodeId
           in: path
           required: true
-          description: UUID of object
+          description: UUID of node
           schema:
             type: string
       requestBody:
@@ -290,4 +294,3 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      
