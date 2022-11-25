@@ -6,6 +6,8 @@ use std::io::ErrorKind as IOErrorKind;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use rocket::data::{ByteUnit, ToByteUnit};
 use rocket::fairing::AdHoc;
@@ -44,6 +46,8 @@ struct NodeServerState {
     coordinator_url: Url,
     max_shard_size: ByteUnit,
     reconstruct_retries: usize,
+    min_stats_query_interval: Duration,
+    last_stats_query: Mutex<Instant>,
     shard_store: Arc<shard_store::ShardStore<32>>,
 }
 
@@ -101,7 +105,7 @@ impl<'r, 'a: 'r, const N: usize> Responder<'r, 'a> for ShardResponse<'a, N> {
 async fn reconstruct_shard<'a>(
     shard_digest: HexDigest<32>,
     reconstruct_map: Json<node_api::ShardReconstructRequest>,
-    state: &State<NodeServerState>,
+    state: &State<Arc<NodeServerState>>,
 ) -> Result<(), error::APIError> {
     use rand::seq::IteratorRandom;
     use tokio::io::AsyncWriteExt;
@@ -463,7 +467,7 @@ async fn reconstruct_shard<'a>(
 #[post("/shard/<shard_digest>/fetch", data = "<fetch_info>")]
 async fn fetch_shard<'a>(
     shard_digest: HexDigest<32>,
-    state: &State<NodeServerState>,
+    state: &State<Arc<NodeServerState>>,
     fetch_info: Json<node_api::ShardFetchRequest<'a>>,
 ) -> Result<(), error::APIError> {
     use tokio::io::AsyncWriteExt;
@@ -561,7 +565,7 @@ async fn fetch_shard<'a>(
 #[get("/shard/<shard_digest>")]
 async fn get_shard<'a>(
     shard_digest: HexDigest<32>,
-    state: &'a State<NodeServerState>,
+    state: &'a State<Arc<NodeServerState>>,
 ) -> Result<ShardResponse<'a, 32>, error::APIError> {
     // Try to retrieve the requested shard from the shard store:
     let shard = state
@@ -587,7 +591,7 @@ async fn get_shard<'a>(
 #[post("/shard", data = "<data>")]
 async fn post_shard(
     data: Data<'_>,
-    state: &State<NodeServerState>,
+    state: &State<Arc<NodeServerState>>,
 ) -> Result<Json<node_api::ShardUploadReceipt<'static, 'static>>, error::APIError> {
     use tokio::io::AsyncWriteExt;
 
@@ -673,7 +677,9 @@ async fn post_shard(
 }
 
 #[get("/stats")]
-async fn get_statistics() -> Json<node_api::NodeStatistics> {
+async fn get_statistics(state: &State<Arc<NodeServerState>>) -> Json<node_api::NodeStatistics> {
+    (*state.last_stats_query.lock().unwrap()) = Instant::now();
+
     Json(node_api::NodeStatistics {
         bandwidth: 42,
         cpu_usage: 0,
@@ -725,6 +731,9 @@ async fn initial_server_state(
 
         max_shard_size: 10.gibibytes(),
 
+        min_stats_query_interval: Duration::from_secs(parsed_config.min_stats_query_interval_sec),
+        last_stats_query: Mutex::new(Instant::now()),
+
         reconstruct_retries: parsed_config.reconstruct_retries,
     })
 }
@@ -758,7 +767,7 @@ async fn rocket() -> _ {
         .expect("Failed to parse the node server configuration.");
 
     let node_server_state = match initial_server_state(parsed_config).await {
-        Ok(state) => state,
+        Ok(state) => Arc::new(state),
         Err(errmsg) => {
             log::error!("{}", errmsg);
             std::process::exit(1);
@@ -771,24 +780,43 @@ async fn rocket() -> _ {
         let node_public_url = node_server_state.public_url.clone();
         let coordinator_url = node_server_state.coordinator_url.clone();
 
+        let reregister_node_server_state = Arc::clone(&node_server_state);
+
         tokio::spawn(async move {
             use futures::stream::StreamExt;
 
             let coord_api_client =
                 decode_rs::api_client::coord::CoordAPIClient::new(coordinator_url.clone());
-            let shards = shard_store
-                .iter_shards()
-                .map(|digest| hex::encode(&digest))
-                .collect()
-                .await;
-            if let Err(e) = coord_api_client
-                .register_node(&node_id, &node_public_url, shards)
-                .await
-            {
-                log::error!("Node registration failed: {:?}", e);
 
-                // TODO: kindly request the server to shutdown
-                std::process::exit(1);
+            let mut register_err = true;
+
+            loop {
+                if Instant::now().duration_since(
+                    *reregister_node_server_state
+                        .last_stats_query
+                        .lock()
+                        .unwrap(),
+                ) > reregister_node_server_state.min_stats_query_interval
+                    || register_err
+                {
+                    let shards = shard_store
+                        .iter_shards()
+                        .map(|digest| hex::encode(&digest))
+                        .collect()
+                        .await;
+
+                    if let Err(e) = coord_api_client
+                        .register_node(&node_id, &node_public_url, shards)
+                        .await
+                    {
+                        log::error!("Node registration failed: {:?}", e);
+                        register_err = true;
+                    } else {
+                        register_err = false;
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_secs(10)).await;
             }
         });
     }

@@ -26,6 +26,12 @@ pub struct NodeServerConfigInterface {
     // 404), but for cases in which nodes don't respond or interrupt a
     // transfer after it was initiated with a 200 OK response.
     pub reconstruct_retries: usize,
+
+    // Minimum interval which this node's statistics need to be
+    // scraped by the coordinator. If a node does not see a scrape in
+    // this period, it assumes it has to re-register with the
+    // coordinator.
+    pub min_stats_query_interval_sec: u64,
 }
 
 impl Default for NodeServerConfigInterface {
@@ -37,6 +43,7 @@ impl Default for NodeServerConfigInterface {
             coordinator_url: None,
             shards_path: "./shards".to_string(),
             reconstruct_retries: 2,
+            min_stats_query_interval_sec: 30,
         }
     }
 }
