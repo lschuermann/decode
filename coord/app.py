@@ -30,6 +30,7 @@ max_chunk_size = max_shard_size * max_data_shards
 liveness_report_period = config['liveness_check']['liveness_report_period']
 report_miss_before_down = config['liveness_check']['report_miss_before_down']
 stats_timeout = config['liveness_check']['stats_timeout']
+reconstruction = config['liveness_check']['reconstruction']
 class ShardNodeMap:
     def __init__(self):
         self.shard_to_nodes = {}
@@ -98,14 +99,15 @@ class NodeStatus:
     # Periodic liveness check request
     def liveness_request(self):
         try:
-            response = requests.get(self.url + "/v0/stats", timeout=stats_timeout)
+            response = requests.get(self.url + "v0/stats", timeout=stats_timeout)
         except requests.Timeout:
             # back off and retry
             self.report_miss += 1
             # Node is down
             if self.report_miss == report_miss_before_down:
                 self.timer.cancel()
-                reconstruct_shards(self.shards)
+                if reconstruction:
+                    reconstruct_shards(self.shards)
                 shard_node_map.remove_node(self.node_id)
                 # remove node from map
             pass
@@ -167,7 +169,7 @@ def reconstruct_shards(shards):
             "node_map": node_map
         }
         # send the reconstruction request
-        response = requests.post(node + '/' + shard.hex() + "/reconstruct", data = payload)
+        response = requests.post(node + shard.hex() + "/reconstruct", data = payload)
 
 def redistribute_shard(shard, source_node_url):
     excluded_nodes_id = []
@@ -185,7 +187,7 @@ def redistribute_shard(shard, source_node_url):
         "ticket": "TICKET"
     }
     # send the reconstruction request
-    response = requests.post(node + '/' + shard.hex() + "/fetch", data = payload)
+    response = requests.post(node + shard.hex() + "/fetch", data = payload)
 
 def place_shards(number_shards, excluded_nodes_id, shard_size):
     nodes = []
@@ -199,9 +201,9 @@ def place_shards(number_shards, excluded_nodes_id, shard_size):
 def place_shard(excluded_nodes_id, shard_size):
     while(1):
         item = shard_node_map.nodemap.random_item()
-        if item.key not in excluded_nodes_id \
-            and (item.value.disk_free - shard_size) / item.value.disk_capacity > 0.3 :
-            return item[0], item[1].url
+        # if item.key not in excluded_nodes_id \
+        #     and (item.value.disk_free - shard_size) / item.value.disk_capacity > 0.3 :
+        return item[0], item[1].url
     
 
 @app.route("/")
@@ -341,7 +343,6 @@ def retrieve_object(objectID):
         all_chunks.append(one_chunk)
 
     return {
-        
             "object_size": object[0].size,
             "chunk_size": object[0].chunk_size,
             "shard_size": object[0].shard_size,
