@@ -98,78 +98,98 @@ class NodeStatus:
 
     # Periodic liveness check request
     def liveness_request(self):
+        reconstruct = False
         try:
             response = requests.get(self.url + "v0/stats", timeout=stats_timeout)
-        except requests.Timeout:
+            restart_timer = True
+        # except requests.Timeout:
+        except:
             # back off and retry
             self.report_miss += 1
             # Node is down
             if self.report_miss == report_miss_before_down:
-                self.timer.cancel()
-                if reconstruction:
-                    reconstruct_shards(self.shards)
-                shard_node_map.remove_node(self.node_id)
+                restart_timer = False
+                reconstruct = True
                 # remove node from map
-            pass
-        except requests.ConnectionError:
-            # TODO: return error
-            pass
+            else:
+                restart_timer = True
+        else:
+            stats = response.json()
+            self.load_avg = stats['load_avg']   # CPU + RAM + DISK I/O
+            self.bandwidth = stats['bandwidth']
+            self.cpu_usage = stats['cpu_usage']
+            self.disk_capacity = stats['disk_capacity']
+            self.disk_free = stats['disk_free']
+            print('stats: ', self.bandwidth, self.cpu_usage, \
+                self.disk_usage, self.load_avg, self.disk_capacity, self.disk_free)
+            if self.load_avg > 0.75:
+                redistribute_shard(self.url)    # TODO: find the most popular shard to redistribute
+        finally:
+            if restart_timer:
+                self.timer = threading.Timer(liveness_report_period, self.liveness_request)
+                self.timer.start()
+            if reconstruction and reconstruct:
+                # TODO: don't have to do reconstruction every time. 
+                # Only when shard does not exist anywhere else
+                reconstruct_shards(self.shards, self.node_id)
+                shard_node_map.remove_node(self.node_id)
 
-        stats = response.json()
-        self.load_avg = stats['load_avg']   # CPU + RAM + DISK I/O
-        self.bandwidth = stats['bandwidth']
-        self.cpu_usage = stats['cpu_usage']
-        self.disk_capacity = stats['disk_capacity']
-        self.disk_free = stats['disk_free']
-        print('stats: ', self.bandwidth, self.cpu_usage, \
-                        self.disk_usage, self.load_avg, self.disk_capacity, self.disk_free)
-        if self.load_avg > 0.75:
-            redistribute_shard(self.url)    # TODO: find the most popular shard to redistribute
-        self.timer = threading.Timer(liveness_report_period, self.liveness_request)
-        self.timer.start()
+def reconstruct_shards(shards, missing_node_id):
+    with app.app_context():
+        for shard in shards:
+            print("Trying to reconstruct shard", shard)
+            node_map = []
+            excluded_nodes_id = [missing_node_id]
+            object_chunk_query = db.session.query(Shard).filter_by(shard_hash = shard)
+            object_id = object_chunk_query[0].object_id
+            chunk_index = object_chunk_query[0].chunk_index
+            object_query = db.session.query(Object).filter_by(id = object_id)
+            shards_query = db.session.query(Shard).filter_by(object_id=object_id, chunk_index=chunk_index)
+            construct_shard_map = []
+            for shard_query in shards_query:
+                print("Processing related shard (in same chunk)", shard_query)
+                nodemap_index = []
+                nodes = shard_node_map.get_shard_nodes(shard_query.shard_hash)
+                print("Shard is on nodes:", nodes)
 
-def reconstruct_shards(shards):
-    for shard in shards:
-        node_map = []
-        excluded_nodes_id = []
-        object_chunk_query = db.session.query(Shard).filter_by(shard_hash = shard)
-        object_id = object_chunk_query[0].object_id
-        chunk_index = object_chunk_query[0].chunk_index
-        object_query = db.session.query(Object).filter_by(id = object_id)
-        shards_query = db.session.query(Shard).filter_by(object_id=object_id, chunk_index=chunk_index)
-        construct_shard_map = []
-        for shard_query in shards_query:
-            if shard_query.shard_hash == shard:
-                construct_shard_map.append({None})
-                continue
-            nodemap_index = []
-            nodes = shard_node_map.get_shard_nodes(shard_query.shard_hash)
-            for node in nodes:
-                excluded_nodes_id += node
-                node_url = shard_node_map.node_map[node].url
-                try:
-                    index = node_map.index(node_url)
-                    nodemap_index.append(index)
-                except:
-                    node_map.append(node_url)
-                    nodemap_index.append(len(node_map) - 1)     
-            construct_shard_map.append({
-                'digest': shard_query.shard_hash.hex(),
-                'nodes': nodemap_index,
-                'ticket': 'TICKET'})
-            
-        # The node this reconstruction should take place
-        node = place_shards(1, excluded_nodes_id, object_query[0].shard_size)[0] 
-        payload = {
-            "chunk_size": object_query[0].chunk_size,
-            "shard_size": object_query[0].shard_size,
-            "code_ratio_data": object_query[0].code_ratio_data,
-            "code_ratio_parity": object_query[0].code_ratio_parity,
-            "shard_map": construct_shard_map,
-            "node_map": node_map
-        }
-        # send the reconstruction request
-        response = requests.post(node + shard.hex() + "/reconstruct", data = payload)
+                for node_idx, node in enumerate(nodes):
+                    if shard_query.shard_hash == shard:
+                        break
+
+                    if node_idx == 0:
+                        print("Excluding its first node", node)
+                        excluded_nodes_id += [node]
+                    node_url = shard_node_map.nodemap[node].url
+                    try:
+                        index = node_map.index(node_url)
+                        nodemap_index.append(index)
+                    except:
+                        node_map.append(node_url)
+                        nodemap_index.append(len(node_map) - 1)  
+   
+                construct_shard_map.append({
+                    'digest': shard_query.shard_hash.hex(),
+                    'nodes': nodemap_index,
+                })
+
+            print("Constuct shard map:", construct_shard_map)
+                
+            # The node this reconstruction should take place
+            print("Trying to find a node to place the reconstructed shard {} on, excluded nodes: {}", shard, excluded_nodes_id)
+            node_id, node_url = place_shards(1, excluded_nodes_id, object_query[0].shard_size)[0] 
+            payload = {
+                "chunk_size": object_query[0].chunk_size,
+                "shard_size": object_query[0].shard_size,
+                "code_ratio_data": object_query[0].code_ratio_data,
+                "code_ratio_parity": object_query[0].code_ratio_parity,
+                "shard_map": construct_shard_map,
+                "node_map": node_map
+            }
+            # send the reconstruction request
+            print("Seding reconstruction request to node {} ({}) for shard {}: {}".format(node_id, node_url, shard.hex(), payload))
+            response = requests.post(node_url + "v0/shard/" + shard.hex() + "/reconstruct", json = payload)
+            print("Got response", response)
+            shard_node_map.add_shard(node_id, shard)
 
 def redistribute_shard(shard, source_node_url):
     excluded_nodes_id = []
@@ -181,29 +201,31 @@ def redistribute_shard(shard, source_node_url):
     for shard_query in shards_query:
         excluded_nodes_id += shard_node_map.get_shard_nodes(shard_query.shard_hash)
     # The node this redistribution should take place
-    node = place_shards(1, excluded_nodes_id, object_query[0].shard_size)[0] 
+    _, node_url = place_shards(1, excluded_nodes_id, object_query[0].shard_size)[0] 
     payload = {
         "source_node": source_node_url,
         "ticket": "TICKET"
     }
     # send the reconstruction request
-    response = requests.post(node + shard.hex() + "/fetch", data = payload)
+    response = requests.post(node_url + shard.hex() + "/fetch", data = payload)
 
 def place_shards(number_shards, excluded_nodes_id, shard_size):
     nodes = []
     for _ in range(number_shards):
         node_id, node_url = place_shard(excluded_nodes_id, shard_size)
         excluded_nodes_id.append(node_id)
-        nodes.append(node_url)
+        nodes.append((node_id, node_url))
     return nodes
 
 # Selection algorithm 
 def place_shard(excluded_nodes_id, shard_size):
-    while(1):
+    while len(excluded_nodes_id) < len(shard_node_map.nodemap):
         item = shard_node_map.nodemap.random_item()
-        # if item.key not in excluded_nodes_id \
-        #     and (item.value.disk_free - shard_size) / item.value.disk_capacity > 0.3 :
-        return item[0], item[1].url
+        if item[0] not in excluded_nodes_id: # \
+        #    and (item.value.disk_free - shard_size) / item.value.disk_capacity > 0.3 :
+            return item[0], item[1].url
+    
+    raise RuntimeException("No more nodes to place shards on!")
     
 
 @app.route("/")
@@ -240,6 +262,7 @@ def node_register(node_id):
 
     node_url = body['node_url']
     shards = set([bytes(bytearray.fromhex(i)) for i in body['shards']])
+    # print("Register shards for node:", node_id, shards)
     shard_node_map.remove_node(node_id)
     shard_node_map.add_node(node_id, node_url, shards)
 
@@ -263,7 +286,7 @@ def upload_object():
         for node in nodes:
             chunk.append({
                         "ticket": "RANDOM_TICKET" ,
-                        "node": node,
+                        "node": node[1],
                     })
         shard_map.append(chunk)
 
