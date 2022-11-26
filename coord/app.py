@@ -306,7 +306,7 @@ def finalize_object(objectID):
         db.session.add(chunk_row)
         for shard_index, res_shard in enumerate(res_chunk):
             digest = bytes(bytearray.fromhex(res_shard["digest"]))
-            node_id = res_shard['node_id']
+            node_id = res_shard['receipt']
             shard_node_map.add_shard(node_id, digest)
             # receipt = i["receipt"] # Ideally should check the vadility of the receipt
             shard_row = Shard(objectID, chunk_index, shard_index, digest)
@@ -332,7 +332,7 @@ def retrieve_object(objectID):
             nodemap_index = []
             nodes = shard_node_map.get_shard_nodes(digest)
             for node in nodes:
-                node_url = shard_node_map.node_map[node].url
+                node_url = shard_node_map.nodemap[node].url
                 try:
                     index = node_map.index(node_url)
                     nodemap_index.append(index)

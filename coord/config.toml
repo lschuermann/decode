@@ -3,10 +3,10 @@
 max_data_shards = 5
 parity_shards = 2
 [shard_size] # in Bytes
-max_shard_size = 52428800 # 50MB
+max_shard_size = 52428800 # 50MB 
 min_shard_size = 5242880
 [liveness_check] 
 liveness_report_period = 10  # how often coord fetches report from nodes
 stats_timeout = 5            # timeout for stats request
 report_miss_before_down = 3  # how many reports nodes can miss before coord thinks it is down
-reconstruction = False
+reconstruction = false
