@@ -28,37 +28,41 @@ defmodule DecodeCoord.NodeRank do
     {metrics_iter, node_seen} =
       state
       |> Enum.map_reduce(false, fn {node, metric}, node_seen ->
-           {{node, metric}, node_seen || (node == node_pid)}
-         end)
+        {{node, metric}, node_seen || node == node_pid}
+      end)
 
     if not node_seen do
-      Process.monitor node_pid
+      Process.monitor(node_pid)
     end
 
     {:reply, :ok,
      metrics_iter
      |> Enum.filter(fn {node, _metric} -> node != node_pid end)
      |> then(fn list -> [{node_pid, metrics} | list] end)
-     |> Enum.sort_by(fn {_node, metric} ->
-       # TODO: lookup current max shard size
-       DecodeCoord.NodeMetrics.rank_upload(50 * 1024 * 1024, metric)
-     end, :desc)
-     |> Enum.to_list
-    }
+     |> Enum.sort_by(
+       fn {_node, metric} ->
+         # TODO: lookup current max shard size
+         DecodeCoord.NodeMetrics.rank_upload(50 * 1024 * 1024, metric)
+       end,
+       :desc
+     )
+     |> Enum.to_list()}
   end
 
   @impl true
   def handle_call({:get_nodes, count, excluded}, _from, state) do
-    ranked_nodes = state
-    |> Enum.filter(fn {node, _metric} -> not MapSet.member?(excluded, node) end)
-    |> then(fn enum ->
-      if count != nil do
-	Enum.take(enum, count)
-      else
-	enum
-      end
-    end)
-    |> Enum.to_list
+    ranked_nodes =
+      state
+      |> Enum.filter(fn {node, _metric} -> not MapSet.member?(excluded, node) end)
+      |> then(fn enum ->
+        if count != nil do
+          Enum.take(enum, count)
+        else
+          enum
+        end
+      end)
+      |> Enum.to_list()
+
     {:reply, {:ok, ranked_nodes}, state}
   end
 
@@ -68,8 +72,7 @@ defmodule DecodeCoord.NodeRank do
       :noreply,
       state
       |> Enum.filter(fn {node, _metric} -> node != pid end)
-      |> Enum.to_list
+      |> Enum.to_list()
     }
   end
-
 end

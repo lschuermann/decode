@@ -18,9 +18,9 @@ defmodule DecodeCoord.Objects.Object do
   end
 
   def build_chunk_map(
-    %DecodeCoord.Objects.Object{chunks: chunks} = _object,
-    initial_node_maps \\ {Map.new(), Map.new()}
-  ) do
+        %DecodeCoord.Objects.Object{chunks: chunks} = _object,
+        initial_node_maps \\ {Map.new(), Map.new()}
+      ) do
     # Now, build the response. We generate the node and shard map through
     # a map-reduce operation over the returned nodes and chunks. To
     # efficiently build the data structure, we use a Map from node PIDs to
@@ -28,9 +28,8 @@ defmodule DecodeCoord.Objects.Object do
     # structure and convert it into a list.
     chunks
     |> Enum.map_reduce(initial_node_maps, fn db_chunk, node_maps ->
-      DecodeCoord.Objects.Chunk.build_shard_map db_chunk, node_maps
+      DecodeCoord.Objects.Chunk.build_shard_map(db_chunk, node_maps)
     end)
-
   end
 
   @doc false

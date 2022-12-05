@@ -49,7 +49,7 @@ defmodule DecodeCoord.MixProject do
       {:jason, "~> 1.2"},
       {:plug_cowboy, "~> 2.5"},
       {:uuid, "~> 1.1"},
-      {:finch, "~> 0.14"},
+      {:finch, "~> 0.14"}
     ]
   end
 

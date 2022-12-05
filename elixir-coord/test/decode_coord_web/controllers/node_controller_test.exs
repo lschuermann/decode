@@ -8,11 +8,13 @@ defmodule DecodeCoordWeb.NodeControllerTest do
   describe "register node" do
     test "registers a new node with a given UUID, URL and a shard", %{conn: conn} do
       node_id = UUID.uuid4()
-      conn = put(conn,
-	Routes.node_path(conn, :register, node_id), %{
-	  node_url: "http://localhost:8000/",
-	  shards: [],
-	})
+
+      conn =
+        put(conn, Routes.node_path(conn, :register, node_id), %{
+          node_url: "http://localhost:8000/",
+          shards: []
+        })
+
       assert response(conn, 200)
     end
   end

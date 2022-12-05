@@ -10,7 +10,7 @@ defmodule DecodeCoord.Node do
     :metrics,
     :liveness_fail_count,
     :reconstruct_queue,
-    :reconstruct_tasks,
+    :reconstruct_tasks
   ]
 
   # GenServer client interface
@@ -18,51 +18,52 @@ defmodule DecodeCoord.Node do
   def register(node_id, node_url, shards \\ []) do
     GenServer.start_link(
       __MODULE__,
-      { node_id, node_url, shards },
+      {node_id, node_url, shards},
       name: {:via, Registry, {DecodeCoord.Node.Registry, node_id}}
     )
   end
 
   def register_or_update(node_id, node_url, shards \\ []) do
-    register_update_payload = { :register_update, node_url, shards }
+    register_update_payload = {:register_update, node_url, shards}
 
     # Try to call into an existing Node through the Node registry:
     res =
       try do
-	GenServer.call(
-	  {:via, Registry, {DecodeCoord.Node.Registry, node_id}},
-	  register_update_payload
-	)
+        GenServer.call(
+          {:via, Registry, {DecodeCoord.Node.Registry, node_id}},
+          register_update_payload
+        )
       catch
-	:exit, {:noproc, _} -> {:error, :noproc}
+        :exit, {:noproc, _} -> {:error, :noproc}
       end
 
     case res do
       {:error, :noproc} ->
-	# The process does not exist, try to register it. If this in turn
-	# returns that the node was already registered, we may have raced with
-	# another process creating it. Call into the returned PID in this case,
-	# forwarding any potential error to the caller (the PID might've crashed
-	# with the Registry having stale data).
-	case __MODULE__.register(node_id, node_url, shards) do
-	  {:error, {:already_registered, pid}} ->
-	    case GenServer.call(pid, register_update_payload) do
-	      :ok -> {:ok, pid}
-	      v -> v
-	    end
+        # The process does not exist, try to register it. If this in turn
+        # returns that the node was already registered, we may have raced with
+        # another process creating it. Call into the returned PID in this case,
+        # forwarding any potential error to the caller (the PID might've crashed
+        # with the Registry having stale data).
+        case __MODULE__.register(node_id, node_url, shards) do
+          {:error, {:already_registered, pid}} ->
+            case GenServer.call(pid, register_update_payload) do
+              :ok -> {:ok, pid}
+              v -> v
+            end
 
-	  {:ok, pid} -> {:ok, pid}
-	end
+          {:ok, pid} ->
+            {:ok, pid}
+        end
 
       :ok ->
-	# Updating an existing instance worked. Return an {:ok, pid} tuple as
-	# is returned in other branches:
-	{:ok, elem(hd(Registry.lookup(DecodeCoord.Node.Registry, node_id)), 0)}
+        # Updating an existing instance worked. Return an {:ok, pid} tuple as
+        # is returned in other branches:
+        {:ok, elem(hd(Registry.lookup(DecodeCoord.Node.Registry, node_id)), 0)}
     end
   end
 
   def get_node(node_id) do
-    [{pid, _}] = Registry.lookup DecodeCoord.Node.Registry, node_id
+    [{pid, _}] = Registry.lookup(DecodeCoord.Node.Registry, node_id)
     pid
   end
 
@@ -90,15 +91,15 @@ defmodule DecodeCoord.Node do
 
   @impl true
   def init({node_id, node_url, shards}) do
-    Logger.info "New node with ID #{UUID.binary_to_string! node_id} registered"
+    Logger.info("New node with ID #{UUID.binary_to_string!(node_id)} registered")
 
     # Register the inverse mapping of shards and nodes as well:
     register_res =
       Enum.reduce_while(shards, :ok, fn shard_digest, :ok ->
-	case DecodeCoord.ShardStore.register_node(shard_digest) do
-	  {:ok, _pid} -> {:cont, :ok}
-	  e -> {:halt, e}
-	end
+        case DecodeCoord.ShardStore.register_node(shard_digest) do
+          {:ok, _pid} -> {:cont, :ok}
+          e -> {:halt, e}
+        end
       end)
 
     # Periodically schedule liveness checks of the node
@@ -111,7 +112,7 @@ defmodule DecodeCoord.Node do
       metrics: nil,
       liveness_fail_count: 0,
       reconstruct_queue: :queue.new(),
-      reconstruct_tasks: MapSet.new(),
+      reconstruct_tasks: MapSet.new()
     }
 
     case register_res do
@@ -143,10 +144,13 @@ defmodule DecodeCoord.Node do
     #
     # However, for now we just ignore this case and blindly accept the new
     # state:
-    Logger.info "Updating node information of " <>
-      "#{UUID.binary_to_string! state.node_id} based on incoming register " <>
-      "request"
-    {:reply, :ok, %DecodeCoord.Node{ state | node_url: node_url, shards: shards }}
+    Logger.info(
+      "Updating node information of " <>
+        "#{UUID.binary_to_string!(state.node_id)} based on incoming register " <>
+        "request"
+    )
+
+    {:reply, :ok, %DecodeCoord.Node{state | node_url: node_url, shards: shards}}
   end
 
   @impl true
@@ -154,8 +158,8 @@ defmodule DecodeCoord.Node do
     # Also populate the Shard registry with this node
     DecodeCoord.ShardStore.register_node(shard_digest)
 
-    new_shards = [ shard_digest | state.shards ]
-    new_state = %DecodeCoord.Node{ state | shards: new_shards }
+    new_shards = [shard_digest | state.shards]
+    new_state = %DecodeCoord.Node{state | shards: new_shards}
     {:reply, :ok, new_state}
   end
 
@@ -176,14 +180,16 @@ defmodule DecodeCoord.Node do
 
   @impl true
   def handle_info(:liveness_check, state) do
-    Logger.debug "Issuing liveness check for node " <>
-      UUID.binary_to_string!(state.node_id)
+    Logger.debug(
+      "Issuing liveness check for node " <>
+        UUID.binary_to_string!(state.node_id)
+    )
 
     Task.async(fn ->
       {
-	:liveness_check_res,
-	Finch.build(:get, "#{state.node_url}/v0/stats")
-	|> Finch.request(DecodeCoord.NodeClient)
+        :liveness_check_res,
+        Finch.build(:get, "#{state.node_url}/v0/stats")
+        |> Finch.request(DecodeCoord.NodeClient)
       }
     end)
 
@@ -201,152 +207,179 @@ defmodule DecodeCoord.Node do
       {:ok, disk_capacity} <- Map.fetch(parsed_body, "disk_capacity"),
       {:ok, disk_free} <- Map.fetch(parsed_body, "disk_free")
     ) do
-	Logger.debug "Node #{UUID.binary_to_string! state.node_id} passed " <>
-	"liveness check."
+      Logger.debug(
+        "Node #{UUID.binary_to_string!(state.node_id)} passed " <>
+          "liveness check."
+      )
 
-	# TODO: typecheck metrics
+      # TODO: typecheck metrics
 
-	# Report the metrics to the centralized NodeRank process.
-	DecodeCoord.NodeRank.post_metrics(%DecodeCoord.NodeMetrics{
-	  load_avg: load_avg,
-	  disk_capacity: disk_capacity,
-	  disk_free: disk_free,
-        })
+      # Report the metrics to the centralized NodeRank process.
+      DecodeCoord.NodeRank.post_metrics(%DecodeCoord.NodeMetrics{
+        load_avg: load_avg,
+        disk_capacity: disk_capacity,
+        disk_free: disk_free
+      })
 
-	# Schedule a new liveness check
-	Process.send_after(self(), :liveness_check, 5_000)
+      # Schedule a new liveness check
+      Process.send_after(self(), :liveness_check, 5_000)
 
-	{:noreply, %DecodeCoord.Node{ state | liveness_fail_count: 0 }}
+      {:noreply, %DecodeCoord.Node{state | liveness_fail_count: 0}}
     else
       e ->
-	Logger.warn "Liveness check failed for node " <>
-  	  "#{UUID.binary_to_string! state.node_id} with error #{inspect e}"
+        Logger.warn(
+          "Liveness check failed for node " <>
+            "#{UUID.binary_to_string!(state.node_id)} with error #{inspect(e)}"
+        )
 
         new_state = %DecodeCoord.Node{
-	  state | liveness_fail_count: state.liveness_fail_count + 1 }
+          state
+          | liveness_fail_count: state.liveness_fail_count + 1
+        }
 
-	if new_state.liveness_fail_count > liveness_fail_max do
-	  Logger.warn "Node #{UUID.binary_to_string! state.node_id} " <>
-	    "exceeded maximum liveness check tries, terminating."
+        if new_state.liveness_fail_count > liveness_fail_max do
+          Logger.warn(
+            "Node #{UUID.binary_to_string!(state.node_id)} " <>
+              "exceeded maximum liveness check tries, terminating."
+          )
 
-	  {:stop, :liveness, new_state}
-	else
-	  # Schedule a new liveness check
-	  Process.send_after(self(), :liveness_check, 5_000)
+          {:stop, :liveness, new_state}
+        else
+          # Schedule a new liveness check
+          Process.send_after(self(), :liveness_check, 5_000)
 
-	  {:noreply, new_state}
-	end
+          {:noreply, new_state}
+        end
     end
   end
 
   def issue_reconstruct(state) do
     parallel_reconstruct_limit = 5
 
-    if MapSet.size(state.reconstruct_tasks) <= parallel_reconstruct_limit
-      and :queue.len(state.reconstruct_queue) > 0 do
+    if MapSet.size(state.reconstruct_tasks) <= parallel_reconstruct_limit and
+         :queue.len(state.reconstruct_queue) > 0 do
       # Remove a shard from the queue to issue a reconstruct request:
-      {{:value, reconstruct_shard_digest}, popped_queue} =
-	:queue.out(state.reconstruct_queue)
+      {{:value, reconstruct_shard_digest}, popped_queue} = :queue.out(state.reconstruct_queue)
 
       # Run the request in an asynchronous task:
       Task.async(fn ->
-	      db_chunk = DecodeCoord.Repo.one(
-  	      from c in DecodeCoord.Objects.Chunk,
-	        join: s in DecodeCoord.Objects.Shard, on: c.id == s.chunk_id,
-	        where: s.digest == ^reconstruct_shard_digest,
-          limit: 1,
-	        preload: [
-	          :object,
-	          shards: ^from(
-	            s in DecodeCoord.Objects.Shard,
-	            order_by: :shard_index
-	          ),
-	        ]
-        )
+        db_chunk =
+          DecodeCoord.Repo.one(
+            from c in DecodeCoord.Objects.Chunk,
+              join: s in DecodeCoord.Objects.Shard,
+              on: c.id == s.chunk_id,
+              where: s.digest == ^reconstruct_shard_digest,
+              limit: 1,
+              preload: [
+                :object,
+                shards:
+                  ^from(
+                    s in DecodeCoord.Objects.Shard,
+                    order_by: :shard_index
+                  )
+              ]
+          )
 
-	if db_chunk == nil do
-	  Logger.error "Don't have any chunk corresponding to shard " <>
-	    "#{Base.encode16 reconstruct_shard_digest}, ignoring!"
-	  {
-	    :shard_reconstruct_res,
-	    reconstruct_shard_digest,
-	    :no_chunk
-	  }
-	else
-  	  {shard_map, {_node_map, node_inv_map}} =
-	    DecodeCoord.Objects.Chunk.build_shard_map db_chunk
+        if db_chunk == nil do
+          Logger.error(
+            "Don't have any chunk corresponding to shard " <>
+              "#{Base.encode16(reconstruct_shard_digest)}, ignoring!"
+          )
 
-	  # node_inv_map maps an a sequential and non-sparse sequence of nodes
-	  # to their PID and URL. Walk the indices and convert it into a list to
-	  # return to the client:
-	  node_list = for idx <- 0..(map_size(node_inv_map) - 1)//1 do
-	    {_pid, url} = Map.get node_inv_map, idx
-	    url
-	  end
+          {
+            :shard_reconstruct_res,
+            reconstruct_shard_digest,
+            :no_chunk
+          }
+        else
+          {shard_map, {_node_map, node_inv_map}} =
+            DecodeCoord.Objects.Chunk.build_shard_map(db_chunk)
 
-	  request_payload = %{
-	    chunk_size: db_chunk.object.chunk_size,
-	    shard_size: db_chunk.object.shard_size,
-	    code_ratio_data: db_chunk.object.code_ratio_data,
-	    code_ratio_parity: db_chunk.object.code_ratio_parity,
-	    shard_map: shard_map,
-	    node_map: node_list,
-	  }
+          # node_inv_map maps an a sequential and non-sparse sequence of nodes
+          # to their PID and URL. Walk the indices and convert it into a list to
+          # return to the client:
+          node_list =
+            for idx <- 0..(map_size(node_inv_map) - 1)//1 do
+              {_pid, url} = Map.get(node_inv_map, idx)
+              url
+            end
 
-    IO.puts "Reconstruct request payload: #{inspect request_payload}"
-	  {
-	    :shard_reconstruct_res,
-	    reconstruct_shard_digest,
-	    Finch.build(
-	      :post,
-	      "#{state.node_url}/v0/shard/#{Base.encode16 reconstruct_shard_digest}/reconstruct",
-	      [],
-	      Jason.encode_to_iodata!(request_payload)
-	    )
-	    |> Finch.request(DecodeCoord.NodeClient)
-	  }
-	end
+          request_payload = %{
+            chunk_size: db_chunk.object.chunk_size,
+            shard_size: db_chunk.object.shard_size,
+            code_ratio_data: db_chunk.object.code_ratio_data,
+            code_ratio_parity: db_chunk.object.code_ratio_parity,
+            shard_map: shard_map,
+            node_map: node_list
+          }
+
+          IO.puts("Reconstruct request payload: #{inspect(request_payload)}")
+
+          {
+            :shard_reconstruct_res,
+            reconstruct_shard_digest,
+            Finch.build(
+              :post,
+              "#{state.node_url}/v0/shard/#{Base.encode16(reconstruct_shard_digest)}/reconstruct",
+              [],
+              Jason.encode_to_iodata!(request_payload)
+            )
+            |> Finch.request(DecodeCoord.NodeClient)
+          }
+        end
       end)
 
-      {true, %DecodeCoord.Node{
-	  state |
-	  reconstruct_queue: popped_queue,
-	  reconstruct_tasks: MapSet.put(
-	    state.reconstruct_tasks, reconstruct_shard_digest)
-}}
+      {true,
+       %DecodeCoord.Node{
+         state
+         | reconstruct_queue: popped_queue,
+           reconstruct_tasks:
+             MapSet.put(
+               state.reconstruct_tasks,
+               reconstruct_shard_digest
+             )
+       }}
     else
-      { false, state }
+      {false, state}
     end
   end
 
   @impl true
   def handle_call({:enqueue_reconstruct, shard_digest}, _from, state) do
     enqueued_state = %DecodeCoord.Node{
-      state | reconstruct_queue: :queue.in(
-	shard_digest, state.reconstruct_queue)
+      state
+      | reconstruct_queue:
+          :queue.in(
+            shard_digest,
+            state.reconstruct_queue
+          )
     }
 
-    { _, processed_state } = issue_reconstruct(enqueued_state)
+    {_, processed_state} = issue_reconstruct(enqueued_state)
 
     {:reply, :ok, processed_state}
   end
 
   @impl true
   def handle_info({_ref, {:shard_reconstruct_res, shard_digest, request_result}}, state) do
-    Logger.info "Reconstructed shard #{Base.encode16 shard_digest}: #{inspect request_result}"
+    Logger.info("Reconstructed shard #{Base.encode16(shard_digest)}: #{inspect(request_result)}")
 
-    { _, new_state } = issue_reconstruct(state)
+    {_, new_state} = issue_reconstruct(state)
 
-    {:noreply, %DecodeCoord.Node{
-	new_state
-	| reconstruct_tasks: MapSet.delete(
-	  state.reconstruct_tasks, shard_digest)
-    }}
+    {:noreply,
+     %DecodeCoord.Node{
+       new_state
+       | reconstruct_tasks:
+           MapSet.delete(
+             state.reconstruct_tasks,
+             shard_digest
+           )
+     }}
   end
 
   @impl true
   def handle_info(info_payload, state) do
-    Logger.warn "Unknown info payload: #{inspect info_payload}"
+    Logger.warn("Unknown info payload: #{inspect(info_payload)}")
     {:noreply, state}
   end
 end

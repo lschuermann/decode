@@ -8,10 +8,10 @@ defmodule DecodeCoordWeb.ErrorView do
   # end
 
   def render("bad_request.json", assigns) do
-    error = %{ type: "bad_request" }
+    error = %{type: "bad_request"}
 
-    if Map.has_key? assigns, :description do
-      Map.put error, :description, assigns.description
+    if Map.has_key?(assigns, :description) do
+      Map.put(error, :description, assigns.description)
     else
       error
     end
@@ -20,7 +20,7 @@ defmodule DecodeCoordWeb.ErrorView do
   def render("not_found.json", _assigns) do
     %{
       type: "not_found",
-      description: "The requested resource was not found.",
+      description: "The requested resource was not found."
     }
   end
 

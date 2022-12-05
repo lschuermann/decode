@@ -2,7 +2,11 @@ defmodule DecodeCoordWeb.ObjectView do
   use DecodeCoordWeb, :view
   alias DecodeCoordWeb.ObjectView
 
-  def render("object_retrieval_map.json", %{object: object, shard_map: shard_map, node_map: node_map}) do
+  def render("object_retrieval_map.json", %{
+        object: object,
+        shard_map: shard_map,
+        node_map: node_map
+      }) do
     download_map = %{
       object_size: object.size,
       chunk_size: object.chunk_size,
@@ -10,10 +14,10 @@ defmodule DecodeCoordWeb.ObjectView do
       code_ratio_data: object.code_ratio_data,
       code_ratio_parity: object.code_ratio_parity,
       shard_map: shard_map,
-      node_map: node_map,
+      node_map: node_map
     }
 
-    IO.puts "Download map: #{inspect download_map}"
+    IO.puts("Download map: #{inspect(download_map)}")
 
     download_map
   end
@@ -27,7 +31,7 @@ defmodule DecodeCoordWeb.ObjectView do
       code_ratio_data: assigns.code_ratio_data,
       code_ratio_parity: assigns.code_ratio_parity,
       shard_map: assigns.shard_map,
-      signature: "",
+      signature: ""
     }
   end
 end
