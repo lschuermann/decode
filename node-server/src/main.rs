@@ -51,7 +51,7 @@ struct NodeServerState {
     shard_store: Arc<shard_store::ShardStore<32>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct HexDigest<const N: usize> {
     digest: [u8; N],
 }
@@ -180,18 +180,30 @@ async fn reconstruct_shard<'a>(
 
     // Our target shard must be part of the set of shards, search for it and
     // determine its index:
-    let shard_digest_str = shard_digest.to_string();
+    // let shard_digest_str = shard_digest.to_string().to_lowercase();
     let target_shard_idx = reconstruct_map
         .shard_map
         .iter()
         .enumerate()
-        .find(|(_idx, shard_spec)| shard_spec.digest.to_lowercase() == shard_digest_str)
+        .find(|(shard_idx, shard_spec)| {
+            HexDigest::from_str(&shard_spec.digest)
+                .map(|hd| hd == shard_digest)
+                .unwrap_or_else(|_| {
+                    log::warn!(
+                        "Unable to parse digest from shard spec {}: \"{}\"",
+                        shard_idx,
+                        &shard_spec.digest,
+                    );
+                    false
+                })
+        })
         .map(|(idx, _shard_spec)| idx)
         .ok_or_else(|| {
             log::error!(
                 "Received reconstruct request, but target shard ({:?}) is not in \
-	     the set of shards of the to-be reconstructed object.",
+		 the set of shards of the to-be reconstructed object: {:?}.",
                 shard_digest,
+                reconstruct_map.shard_map,
             );
             error::APIError::InternalServerError
         })?;
@@ -354,12 +366,25 @@ async fn reconstruct_shard<'a>(
                     use tokio::io::AsyncWriteExt;
 
                     while let Some(res) = stream.next().await {
-                        let mut buffer = res.map_err(|e| Err(Ok(e)))?;
-                        writer
-                            .write_all_buf(&mut buffer)
-                            .await
-                            .map_err(|e| Err(Err(e)))?;
+                        match res {
+                            Err(e) => {
+                                log::warn!("Shard download error: {:?}", e);
+                                writer.shutdown().await.unwrap();
+                                return Err(Err(Ok(e)));
+                            }
+                            Ok(mut buffer) => {
+                                writer
+                                    .write_all_buf(&mut buffer)
+                                    .await
+                                    .map_err(|e| Err(Err(e)))?;
+                            }
+                        }
                     }
+
+                    // After we've consumed all data, shutdown the writer:
+                    log::trace!("Shard download: shutting down writer");
+                    writer.shutdown().await.unwrap();
+                    core::mem::drop(writer);
 
                     Ok::<(), Result<AsyncReedSolomonError, Result<reqwest::Error, std::io::Error>>>(
                         (),
@@ -380,6 +405,7 @@ async fn reconstruct_shard<'a>(
         let reconstruct_future = async {
             use async_io::AsyncWriteExt;
 
+            log::trace!("Running AsyncReedSolomon::reconstruct_shards...");
             async_reed_solomon
                 .reconstruct_shards(
                     &mut input_shards,
@@ -388,6 +414,7 @@ async fn reconstruct_shard<'a>(
                 )
                 .await
                 .map_err(|e| Ok(e))?;
+            log::trace!("AsyncReedSolomon::reconstruct_shards done, shutting down writers!");
 
             // Finally, shutdown the writers:
             for w in output_shards {

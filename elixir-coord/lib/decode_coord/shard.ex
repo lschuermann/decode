@@ -17,7 +17,6 @@ defmodule DecodeCoord.ShardStore do
     Registry.lookup(DecodeCoord.ShardStore.Registry, shard_digest)
     |> Enum.map(fn {wrapper_pid, _} ->
       try do
-        IO.puts("Getting inner PID from wrapped for nodes lookup: #{inspect(wrapper_pid)}")
         DecodeCoord.ShardStore.WrappedNode.inner(wrapper_pid)
       catch
         :exit, _ -> nil
@@ -56,24 +55,30 @@ defmodule DecodeCoord.ShardStore do
     if length(remain_nodes) < 1 do
       Logger.warn("No remaining nodes for shard #{Base.encode16(shard_digest)}!")
 
-      # Select a node for placing the shard, respecting the other
-      # shards in the chunk to retain fault tolerance:
-      #
-      # TODO: limit one chunk
+      # Select a node for placing the shard, respecting the other shards in the
+      # chunk to retain fault tolerance. We need to use a subquery to retrieve
+      # the chunk first, as we can have multiple shards defined over the same
+      # digest. We need only perform the reconstruction once per shard digest,
+      # not per database shard:
+      missing_shard_chunk_query =
+        from(s in DecodeCoord.Objects.Shard,
+          where: s.digest == ^shard_digest,
+          where: parent_as(:chunk).id == s.chunk_id,
+          limit: 1
+        )
+
+      # With the subquery retrieving a single chunk of which this shard
+      # (identified by its digest) is a member of, now retrieve an ordered set
+      # of shards belonging to the selected chunk:
       db_shards =
         DecodeCoord.Repo.all(
           from os in DecodeCoord.Objects.Shard,
             join: c in DecodeCoord.Objects.Chunk,
+            as: :chunk,
             on: os.chunk_id == c.id,
-            join: is in DecodeCoord.Objects.Shard,
-            on: c.id == is.chunk_id,
-            where: is.digest == ^shard_digest and os.digest != is.digest,
+            where: exists(subquery(missing_shard_chunk_query)),
             order_by: :shard_index
         )
-
-      IO.puts(
-        "Node #{inspect(node_pid)} (wrapper #{inspect(wrapper_node_pid)}) down, building excluded nodes"
-      )
 
       excluded_nodes =
         db_shards
@@ -82,8 +87,6 @@ defmodule DecodeCoord.ShardStore do
         end)
         |> Enum.into(MapSet.new())
         |> MapSet.put(node_pid)
-
-      IO.puts("Node #{inspect(node_pid)}: ranking nodes")
 
       # TODO: what if this fails?
       {:ok, candidate_nodes} = DecodeCoord.NodeRank.get_nodes(1, excluded_nodes)
@@ -96,16 +99,105 @@ defmodule DecodeCoord.ShardStore do
       else
         [{reconstruct_node, _metrics} | _] = candidate_nodes
 
-        IO.puts(
-          "Reconstructing from node #{inspect(node_pid)} on node #{inspect(reconstruct_node)}"
+        Logger.debug(
+          "Reconstructing #{Base.encode16(shard_digest)}, originally on node " <>
+            "#{inspect(node_pid)}, onto node #{inspect(reconstruct_node)}."
         )
 
         DecodeCoord.Node.enqueue_reconstruct(reconstruct_node, shard_digest)
       end
     else
       Logger.debug(
-        "Remaining nodes for shard #{Base.encode16(shard_digest)}: #{inspect(remain_nodes)}"
+        "Remaining nodes for shard #{Base.encode16(shard_digest)}: " <>
+          "#{inspect(remain_nodes)}."
       )
+
+      # TODO: it's possible that we have remaining nodes, but we've still lost
+      # fault tolerance. This can happen specifically when we have multiple
+      # identical shards in a chunk. In this case, we can also use
+      # redistribution to recover fault tolerance, but we use reconstruction for
+      # now:
+
+      # We need to use a subquery to retrieve the chunk first, as we can have
+      # multiple shards defined over the same digest. We need only perform the
+      # reconstruction once per shard digest, not per database shard:
+      missing_shard_chunk_query =
+        from(
+          from s in DecodeCoord.Objects.Shard,
+            where: s.digest == ^shard_digest,
+            where: parent_as(:chunk).id == s.chunk_id,
+            where: parent_as(:twin_shard).id != s.id,
+            limit: 1
+        )
+
+      # Try to select "twin" shards of the queried chunk. If we have at least
+      # one, we should retain `code_ratio_data` copies. This happens to report
+      # all twin shards, but most importantly does not return any shard if there
+      # is no twin shard in a chunk.
+      twin_chunk_shard =
+        DecodeCoord.Repo.one(
+          from s in DecodeCoord.Objects.Shard,
+            as: :twin_shard,
+            join: c in DecodeCoord.Objects.Chunk,
+            as: :chunk,
+            on: s.chunk_id == c.id,
+            where: s.digest == ^shard_digest,
+            where: exists(subquery(missing_shard_chunk_query)),
+            preload: [chunk: :object],
+            limit: 1
+        )
+
+      if twin_chunk_shard != nil do
+        if length(remain_nodes) <
+             twin_chunk_shard.chunk.object.code_ratio_data +
+               twin_chunk_shard.chunk.object.code_ratio_parity do
+          Logger.debug(
+            "Shard #{Base.encode16(shard_digest)} has twins in the same " <>
+              "chunk and is missing copies, reconstructing."
+          )
+
+          # TODO: perhaps schedule reconstruction on more than one node if we
+          # know we're missing multiple?
+
+          # TODO: this code is duplicated.
+          excluded_nodes =
+            remain_nodes
+            |> Enum.into(MapSet.new())
+            |> MapSet.put(node_pid)
+
+          # TODO: what if this fails?
+          {:ok, candidate_nodes} = DecodeCoord.NodeRank.get_nodes(1, excluded_nodes)
+
+          if length(candidate_nodes) < 1 do
+            Logger.error(
+              "Unable to find a node to reconstruct " <>
+                "#{Base.encode16(shard_digest)} on."
+            )
+          else
+            [{reconstruct_node, _metrics} | _] = candidate_nodes
+
+            Logger.debug(
+              "Reconstructing #{Base.encode16(shard_digest)}, originally on node " <>
+                "#{inspect(node_pid)}, onto node #{inspect(reconstruct_node)}."
+            )
+
+            DecodeCoord.Node.enqueue_reconstruct(reconstruct_node, shard_digest)
+          end
+        else
+          Logger.debug(
+            "Shard #{Base.encode16(shard_digest)} has twin shards in the " <>
+              "same chunk which are on a sufficient number of nodes (" <>
+              "#{length(remain_nodes)} vs. " <>
+              "#{twin_chunk_shard.chunk.object.code_ratio_data} + " <>
+              "#{twin_chunk_shard.chunk.object.code_ratio_parity})."
+          )
+        end
+      else
+        Logger.debug(
+          "Shard #{Base.encode16(shard_digest)} has no twin shards in the " <>
+            "same chunk, hence no need to reconstruct / redistribute."
+        )
+      end
     end
   end
 
@@ -141,7 +233,6 @@ defmodule DecodeCoord.ShardStore do
 
     @impl true
     def handle_call(:inner, _from, {monitored_node, shard_digest}) do
-      IO.puts("Inner impl")
       {:reply, monitored_node, {monitored_node, shard_digest}}
     end
 

@@ -141,13 +141,24 @@ defmodule DecodeCoordWeb.ObjectController do
         _object_id = Keyword.get(parsed_uuid, :binary)
 
         # Now we can try to query the database against it:
-        #
-        # TODO: order the chunks and shards by their index
         db_object =
           DecodeCoord.Repo.one(
             from o in DecodeCoord.Objects.Object,
               where: o.id == ^object_id_str,
-              preload: [chunks: :shards]
+              preload: [
+                chunks:
+                  ^from(
+                    c in DecodeCoord.Objects.Chunk,
+                    order_by: :chunk_index,
+                    preload: [
+                      shards:
+                        ^from(
+                          s in DecodeCoord.Objects.Shard,
+                          order_by: :shard_index
+                        )
+                    ]
+                  )
+              ]
           )
 
         # Check if the object exists:

@@ -37,8 +37,7 @@ defmodule DecodeCoord.NodeMetrics do
         0
 
       true ->
-        disk_free / disk_capacity * 10
-        +(1 - load_avg) * 3
+        disk_free / disk_capacity * 10 + (1 - load_avg) * 3
     end
   end
 

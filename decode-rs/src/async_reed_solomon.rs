@@ -355,6 +355,12 @@ impl AsyncReedSolomon {
         // cases in which the length isn't specified.
         let mut reconstructed: usize = 0;
         while reconstructed < len.unwrap_or(usize::MAX) {
+            log::trace!(
+                "Reconstructed loop iteration, reconstructed {} out of {:?}",
+                reconstructed,
+                len
+            );
+
             // Determine the remaining read length (limited to that of a single
             // burst per row) on a per-reader granularity and then issue the
             // reads simutaneously:
@@ -370,12 +376,14 @@ impl AsyncReedSolomon {
                 self.input_buffers
                     .iter_mut()
                     .zip(readers.iter_mut())
-                    .filter_map(|(buffer, opt_reader)| {
-                        opt_reader.as_mut().map(|reader| (buffer, reader))
+                    .enumerate()
+                    .filter_map(|(idx, (buffer, opt_reader))| {
+                        opt_reader.as_mut().map(|reader| (idx, (buffer, reader)))
                     })
-                    .map(|(buffer, reader)| async move {
+                    .map(|(idx, (buffer, reader))| async move {
                         // Read until encouting an end-of-file or filling up the
                         // pre-sliced buffer:
+                        let mut eof_encountered = false;
                         let mut progress = 0;
                         while progress < read_row_bytes_limit {
                             let read_bytes = reader
@@ -383,10 +391,19 @@ impl AsyncReedSolomon {
                                 .read(&mut buffer[progress..read_row_bytes_limit])
                                 .await?;
                             progress += read_bytes;
-                            if progress == 0 {
+                            if read_bytes == 0 {
+                                eof_encountered = true;
                                 break;
                             }
                         }
+
+                        log::trace!(
+                            "Input reader yielded {} bytes for shard {}, EOF encountered? {:?}",
+                            progress,
+			    idx,
+                            eof_encountered
+                        );
+
                         Ok(progress)
                     }),
             )
@@ -446,6 +463,8 @@ impl AsyncReedSolomon {
                 // should be enforced above:
                 .unwrap();
 
+            log::error!("Reed solomon row bytes: {}", read_row_bytes);
+
             // Subslice the buffers, returning a data structure whose format is
             // compatible with what [`ReedSolomon::reconstruct_data`]
             // expects. This is required as we need to limit the length of each
@@ -457,7 +476,7 @@ impl AsyncReedSolomon {
                 .enumerate()
                 .map(|(i, (b, r))| {
                     if r.is_some() {
-                        (&mut b[..read_row_bytes_limit], true)
+                        (&mut b[..read_row_bytes], true)
                     } else if only_reconstruct_data && i >= self.rs.data_shard_count() {
                         // Don't actually slice any memory, this shard must not
                         // be relevant to the Reed Solomon reconstruction
@@ -465,7 +484,7 @@ impl AsyncReedSolomon {
                         // data shards to be reconstructed.
                         (&mut b[..0], false)
                     } else {
-                        (&mut b[..read_row_bytes_limit], false)
+                        (&mut b[..read_row_bytes], false)
                     }
                 })
                 .collect();
@@ -473,13 +492,17 @@ impl AsyncReedSolomon {
             // Run the routine for reconstructing shards, depending on which
             // shards we'd like to reconstruct:
             if only_reconstruct_data {
+                log::trace!("Running ReedSolomon::reconstruct_data...");
                 self.rs
                     .reconstruct_data(&mut limited_buffers)
                     .map_err(AsyncReedSolomonError::ReedSolomonError)?;
+                log::trace!("ReedSolomon::reconstruct_data done.");
             } else {
+                log::trace!("Running ReedSolomon::reconstruct...");
                 self.rs
                     .reconstruct(&mut limited_buffers)
                     .map_err(AsyncReedSolomonError::ReedSolomonError)?;
+                log::trace!("ReedSolomon::reconstruct done.");
             }
 
             // Now, write the reconstructed rows into the writers:

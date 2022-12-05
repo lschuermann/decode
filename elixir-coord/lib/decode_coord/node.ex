@@ -254,7 +254,7 @@ defmodule DecodeCoord.Node do
   end
 
   def issue_reconstruct(state) do
-    parallel_reconstruct_limit = 5
+    parallel_reconstruct_limit = 8
 
     if MapSet.size(state.reconstruct_tasks) <= parallel_reconstruct_limit and
          :queue.len(state.reconstruct_queue) > 0 do
@@ -263,11 +263,19 @@ defmodule DecodeCoord.Node do
 
       # Run the request in an asynchronous task:
       Task.async(fn ->
-        db_chunk =
+        # We fetch the shard of the chunk to reconstruct, in order to build its
+        # shard_map as part of the reconstruct request. However, on the very
+        # last chunk, the chunk size may actually be less than the chunk_size
+        # parameter of the object. Hence we also join this with the next chunk
+        # and if there is not successor, we need to calculate the actual chunk
+        # size:
+        [db_chunk, has_successor] =
           DecodeCoord.Repo.one(
             from c in DecodeCoord.Objects.Chunk,
               join: s in DecodeCoord.Objects.Shard,
               on: c.id == s.chunk_id,
+              left_join: c_succ in DecodeCoord.Objects.Chunk,
+              on: c_succ.object_id == c.object_id and c_succ.chunk_index == c.chunk_index + 1,
               where: s.digest == ^reconstruct_shard_digest,
               limit: 1,
               preload: [
@@ -277,7 +285,8 @@ defmodule DecodeCoord.Node do
                     s in DecodeCoord.Objects.Shard,
                     order_by: :shard_index
                   )
-              ]
+              ],
+              select: [c, not is_nil(c_succ)]
           )
 
         if db_chunk == nil do
@@ -304,9 +313,29 @@ defmodule DecodeCoord.Node do
               url
             end
 
+          {chunk_size, shard_size} =
+            if not has_successor do
+              Logger.debug(
+                "Chunk #{Base.encode16(reconstruct_shard_digest)} has no " <>
+                  "successor, so it may be smaller than object's chunk_size " <>
+                  "of #{db_chunk.object.chunk_size}."
+              )
+
+              chunk_size =
+                rem(
+                  db_chunk.object.size,
+                  db_chunk.object.chunk_size
+                )
+
+              shard_size = min(chunk_size, db_chunk.object.shard_size)
+              {chunk_size, shard_size}
+            else
+              {db_chunk.object.chunk_size, db_chunk.object.shard_size}
+            end
+
           request_payload = %{
-            chunk_size: db_chunk.object.chunk_size,
-            shard_size: db_chunk.object.shard_size,
+            chunk_size: chunk_size,
+            shard_size: shard_size,
             code_ratio_data: db_chunk.object.code_ratio_data,
             code_ratio_parity: db_chunk.object.code_ratio_parity,
             shard_map: shard_map,
@@ -324,7 +353,10 @@ defmodule DecodeCoord.Node do
               [],
               Jason.encode_to_iodata!(request_payload)
             )
-            |> Finch.request(DecodeCoord.NodeClient)
+            |> Finch.request(DecodeCoord.NodeClient,
+              pool_timeout: 600_000,
+              receive_timeout: 600_000
+            )
           }
         end
       end)
@@ -361,8 +393,32 @@ defmodule DecodeCoord.Node do
   end
 
   @impl true
+  def handle_info(
+        {_ref, {:shard_reconstruct_res, shard_digest, {:ok, %Finch.Response{status: 200}}}},
+        state
+      ) do
+    Logger.info("Reconstructed shard #{Base.encode16(shard_digest)} successfully!")
+
+    # TODO: register shard for node
+
+    {_, new_state} = issue_reconstruct(state)
+
+    {:noreply,
+     %DecodeCoord.Node{
+       new_state
+       | reconstruct_tasks:
+           MapSet.delete(
+             state.reconstruct_tasks,
+             shard_digest
+           )
+     }}
+  end
+
+  @impl true
   def handle_info({_ref, {:shard_reconstruct_res, shard_digest, request_result}}, state) do
-    Logger.info("Reconstructed shard #{Base.encode16(shard_digest)}: #{inspect(request_result)}")
+    Logger.info(
+      "Reconstruction of shard #{Base.encode16(shard_digest)} failed: #{inspect(request_result)}"
+    )
 
     {_, new_state} = issue_reconstruct(state)
 
