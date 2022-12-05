@@ -1,0 +1,80 @@
+- name: Set as coord
+  become: yes
+  become_user: root
+  command: touch /is-coord
+
+- name: Install PostgreSQL
+  become: yes
+  become_user: root
+  apt:
+    name: postgresql
+    state: present
+
+- name: Check if decode database exists
+  become: yes
+  become_user: postgres
+  command: psql "decode_coord" -c "\\q"
+  failed_when: false
+  register: decode_coord_db_check
+  changed_when: false
+
+- name: Create decode database and user
+  become: yes
+  become_user: postgres
+  shell: |
+    psql -c "CREATE USER localuser"
+    psql -c "CREATE DATABASE decode_coord"
+    psql -c "GRANT ALL PRIVILEGES ON DATABASE decode_coord TO localuser"
+  when: decode_coord_db_check.rc != 0
+
+- name: Install Python 3 and python3-venv
+  become: yes
+  become_user: root
+  apt:
+    name:
+      - python3
+      - python3-venv
+    state: present
+
+- name: Install coordinator dependencies in virtualenv
+  pip:
+    virtualenv: "/localdisk/localuser/decode/.coord_venv"
+    virtualenv_command: "python3 -m venv"
+    requirements: "/localdisk/localuser/decode/coord/requirements.txt"
+    state: present
+
+- name: Initialize and/or upgrade the database
+  shell: |
+    cd /localdisk/localuser/decode/coord
+    . ../.coord_venv/bin/activate
+    . ./.env
+    export PYTHONPATH="$(readlink -f .):$PYTHONPATH"
+    export DATABASE_URL="postgresql:///decode_coord"
+    flask db upgrade
+
+- name: Create decode-coord systemd service
+  become: yes
+  become_user: root
+  copy:
+    dest: "/etc/systemd/system/decode-coord.service"
+    mode: "0744"
+    content: |
+      [Unit]
+      Description=DECODE coordinator service
+      Requires=network-online.target
+
+      [Service]
+      WorkingDirectory=/localdisk/localuser/decode/coord
+      User=localuser
+      ExecStart=/bin/bash -c "source ../.coord_venv/bin/activate; source .env; export PYTHONPATH=\"$(readlink -f .):$PYTHONPATH\"; export DATABASE_URL=\"postgresql:///decode_coord\"; flask run --host 0.0.0.0"
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Start the decode-coord service
+  become: yes
+  become_user: root
+  systemd:
+    name: decode-coord
+    state: started
+    daemon_reload: true

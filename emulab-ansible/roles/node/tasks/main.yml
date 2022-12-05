@@ -1,0 +1,74 @@
+- name: Check if node has UUID assigned
+  become: yes
+  become_user: root
+  stat:
+    path: /node-uuid
+  register: node_uuid_check
+
+- name: Set node UUID
+  become: yes
+  become_user: root
+  shell: |
+    cat /proc/sys/kernel/random/uuid > /node-uuid
+  when: not node_uuid_check.stat.exists
+
+- name: Read node UUID back into variable
+  become: yes
+  become_user: root
+  slurp:
+    src: /node-uuid
+  register: slurped_uuid
+
+- name: Patch out the simd-accel option from decode-rs
+  shell: |
+    sed -e 's/, features = \["simd-accel"\]//g' -i /localdisk/localuser/decode/decode-rs/Cargo.toml
+
+- name: Build the node-server application binary
+  shell: |
+    . /localdisk/localuser/.cargo/env
+    cd /localdisk/localuser/decode/node-server
+    cargo build --release
+
+- name: Create DecodeNode.toml configuration file
+  copy:
+    dest: /localdisk/localuser/decode/node-server/DecodeNode.toml
+    content: |
+      # Basic Server Configuration
+      public_url = "http://{{ internal_ip }}:8000"
+      coordinator_url = "{{ coord_url }}"
+      node_id = "{{ slurped_uuid.content | b64decode | trim }}"
+      shards_path = "./shards"
+
+      # Webserver config
+      port = 8000
+      address = "0.0.0.0"
+
+- name: Create decode-node systemd service
+  become: yes
+  become_user: root
+  copy:
+    dest: "/etc/systemd/system/decode-node.service"
+    mode: "0744"
+    content: |
+      [Unit]
+      Description=DECODE node service
+      Requires=network-online.target
+
+      [Service]
+      WorkingDirectory=/localdisk/localuser/decode/node-server
+      User=localuser
+      ExecStart=/bin/bash -c "/bin/rm -f /localdisk/localuser/decode/node-server/shards/lock; exec /localdisk/localuser/decode/target/release/node-server"
+      Restart=always
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Start the decode-node service
+  become: yes
+  become_user: root
+  systemd:
+    name: decode-node
+    state: restarted
+    daemon_reload: true
+

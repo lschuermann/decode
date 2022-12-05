@@ -1,0 +1,54 @@
+- hosts: all
+  roles:
+    - role: local_user
+      become: yes
+    - role: base
+      become: yes
+      become_user: localuser
+
+- hosts: decode-node
+  roles:
+    - role: node
+      become: yes
+      become_user: localuser
+
+- hosts: decode-coord
+  roles:
+    # - role: coord
+    #   become: yes
+    #   become_user: localuser
+    # - role: elixir-coord
+    #   become: yes
+    #   become_user: localuser
+
+- hosts: decode-client
+  roles:
+    - role: client
+      become: yes
+      become_user: localuser
+
+# - hosts: decode-coord
+#   become: "yes"
+#   roles:
+#     - role: local_user
+#       become: yes
+#     - role: base
+#       become: yes
+#       become_user: localuser
+#     - role: coord
+#       become: yes
+#       become_user: localuser
+#   poll: 0
+
+# - hosts: decode-client
+#   become: "yes"
+#   roles:
+#     - role: local_user
+#       become: yes
+#     - role: base
+#       become: yes
+#       become_user: localuser
+#     - role: client
+#       become: yes
+#       become_user: localuser
+#   poll: 0

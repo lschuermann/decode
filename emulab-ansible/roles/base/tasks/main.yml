@@ -1,0 +1,26 @@
+# Install rustup
+
+- name: Check whether rustup is installed
+  shell: |
+    . /localdisk/localuser/.cargo/env
+    rustup --version
+  failed_when: false
+  register: rustup_version
+  changed_when: false
+
+- name: Install rustup
+  shell: |
+    unset RUSTUP_HOME
+    unset CARGO_HOME
+    curl https://sh.rustup.rs -sSf | sh -s -- -y
+  when: rustup_version.rc != 0
+
+- name: Clone the decode git repository
+  git:
+    repo: "http://github.com/lschuermann/decode.git"
+    dest: "/localdisk/localuser/decode"
+    version: "{{ decode_git_rev }}"
+    clone: yes
+    update: yes
+    force: yes
+  register: decode_git

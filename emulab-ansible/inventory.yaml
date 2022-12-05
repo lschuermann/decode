@@ -1,0 +1,26 @@
+all:
+  vars:
+    decode_git_rev: 85681519ca495d512a26f2571ca945f67f8e13d1
+  hosts:
+  children:
+    decode-node:
+      vars:
+        coord_url: "http://node3:4000/"
+      hosts:
+        ms0302.utah.cloudlab.us:
+          internal_hostname: node0
+        ms0340.utah.cloudlab.us:
+          internal_hostname: node1
+        ms0316.utah.cloudlab.us:
+          internal_hostname: node2
+
+    decode-coord:
+      hosts:
+        ms0309.utah.cloudlab.us:
+          internal_hostname: node3
+
+    decode-client:
+      hosts:
+        ms0309.utah.cloudlab.us:
+          internal_hostname: node3
+

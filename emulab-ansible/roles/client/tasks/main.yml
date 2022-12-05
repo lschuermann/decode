@@ -1,0 +1,4 @@
+- name: Set as client
+  become: yes
+  become_user: root
+  command: touch /is-client
