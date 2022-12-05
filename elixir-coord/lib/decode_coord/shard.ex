@@ -17,6 +17,7 @@ defmodule DecodeCoord.ShardStore do
     Registry.lookup(DecodeCoord.ShardStore.Registry, shard_digest)
     |> Enum.map(fn {wrapper_pid, _} ->
       try do
+        IO.puts "Getting inner PID from wrapped for nodes lookup: #{inspect wrapper_pid}"
 	DecodeCoord.ShardStore.WrappedNode.inner wrapper_pid
       catch
         :exit, _ -> nil
@@ -48,19 +49,22 @@ defmodule DecodeCoord.ShardStore do
     # queue up a reconstruction request on some other node:
     remain_nodes =
       Registry.lookup(DecodeCoord.ShardStore.Registry, shard_digest)
-      |> Enum.filter(fn {pid, _} -> pid != wrapper_node_pid end)
+      |> Enum.map(fn {wrapper_pid, _} -> DecodeCoord.ShardStore.WrappedNode.inner wrapper_pid end)
+      |> Enum.filter(fn pid -> pid != node_pid end)
 
     if length(remain_nodes) < 1 do
       Logger.warn "No remaining nodes for shard #{Base.encode16 shard_digest}!"
 
       # Select a node for placing the shard, respecting the other
       # shards in the chunk to retain fault tolerance:
+      #
+      # TODO: limit one chunk
       db_shards = DecodeCoord.Repo.all(
-	from os in DecodeCoord.Objects.Shard,
-	join: c in DecodeCoord.Objects.Chunk, on: os.chunk_id == c.id,
-	join: is in DecodeCoord.Objects.Shard, on: c.id == is.chunk_id,
-	where: is.digest == ^shard_digest and os.digest != is.digest,
-	order_by: :shard_index
+	      from os in DecodeCoord.Objects.Shard,
+	      join: c in DecodeCoord.Objects.Chunk, on: os.chunk_id == c.id,
+	      join: is in DecodeCoord.Objects.Shard, on: c.id == is.chunk_id,
+	      where: is.digest == ^shard_digest and os.digest != is.digest,
+	      order_by: :shard_index
       )
 
       IO.puts "Node #{inspect node_pid} (wrapper #{inspect wrapper_node_pid}) down, building excluded nodes"
@@ -68,23 +72,25 @@ defmodule DecodeCoord.ShardStore do
       excluded_nodes =
         db_shards
         |> Enum.flat_map(fn shard ->
-	  DecodeCoord.ShardStore.nodes(shard.digest)
+	        DecodeCoord.ShardStore.nodes(shard.digest)
         end)
-	|> Enum.into(MapSet.new())
-	|> MapSet.put(node_pid)
+	      |> Enum.into(MapSet.new())
+	      |> MapSet.put(node_pid)
 
       IO.puts "Node #{inspect node_pid}: ranking nodes"
 
       # TODO: what if this fails?
       {:ok, candidate_nodes} = DecodeCoord.NodeRank.get_nodes(1, excluded_nodes)
       if length(candidate_nodes) < 1 do
-	Logger.error "Unable to find a node to reconstruct "
+	      Logger.error "Unable to find a node to reconstruct "
           <> "#{Base.encode16 shard_digest} on."
       else
-	[{reconstruct_node, _metrics} | _] = candidate_nodes
-	IO.puts "Reconstructing from node #{inspect node_pid} on node #{inspect reconstruct_node}"
-	DecodeCoord.Node.enqueue_reconstruct reconstruct_node, shard_digest
+	      [{reconstruct_node, _metrics} | _] = candidate_nodes
+	      IO.puts "Reconstructing from node #{inspect node_pid} on node #{inspect reconstruct_node}"
+	      DecodeCoord.Node.enqueue_reconstruct reconstruct_node, shard_digest
       end
+    else
+      Logger.debug "Remaining nodes for shard #{Base.encode16 shard_digest}: #{inspect remain_nodes}"
     end
   end
 
@@ -108,8 +114,7 @@ defmodule DecodeCoord.ShardStore do
     end
 
     def inner(pid) do
-      {:ok, wrapped_pid} = GenServer.call pid, :inner
-      wrapped_pid
+      GenServer.call pid, :inner
     end
 
     @impl true
@@ -121,6 +126,7 @@ defmodule DecodeCoord.ShardStore do
 
     @impl true
     def handle_call(:inner, _from, {monitored_node, shard_digest}) do
+      IO.puts "Inner impl"
       {:reply, monitored_node, {monitored_node, shard_digest}}
     end
 

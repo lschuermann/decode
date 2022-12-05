@@ -16,7 +16,9 @@ defmodule DecodeCoordWeb.Router do
     scope "/v0", DecodeCoordWeb do
       put "/node/:node_id", NodeController, :register
 
+      post "/object", ObjectController, :post
       get "/object/:object_id", ObjectController, :get
+      put "/object/:object_id/finalize", ObjectController, :put
     end
   end
 

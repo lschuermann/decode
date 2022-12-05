@@ -611,10 +611,10 @@ impl AsyncReedSolomon {
 
             // Make sure that the reconstruction algorithm has marked all data
             // shards as valid and their length hasn't been changed.
-            assert!(limited_buffers[..self.rs.data_shard_count()]
-                .iter()
-                .find(|(buffer, valid)| !valid || buffer.len() != read_columns)
-                .is_none());
+            //assert!(limited_buffers[..self.rs.data_shard_count()]
+            //    .iter()
+            //    .find(|(buffer, valid)| !valid || buffer.len() != read_columns)
+            //    .is_none());
 
             // Okay, now dump the buffer contents into the writer:
             let write_len = std::cmp::min(

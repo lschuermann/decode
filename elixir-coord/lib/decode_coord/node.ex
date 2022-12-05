@@ -61,6 +61,11 @@ defmodule DecodeCoord.Node do
     end
   end
 
+  def get_node(node_id) do
+    [{pid, _}] = Registry.lookup DecodeCoord.Node.Registry, node_id
+    pid
+  end
+
   def add_shard(pid, shard_digest) do
     GenServer.call(pid, {:add_shard, shard_digest})
   end
@@ -245,17 +250,18 @@ defmodule DecodeCoord.Node do
 
       # Run the request in an asynchronous task:
       Task.async(fn ->
-	db_chunk = DecodeCoord.Repo.one(
-  	  from c in DecodeCoord.Objects.Chunk,
-	  join: s in DecodeCoord.Objects.Shard, on: c.id == s.chunk_id,
-	  where: s.digest == ^reconstruct_shard_digest,
-	  preload: [
-	    :object,
-	    shards: ^from(
-	      s in DecodeCoord.Objects.Shard,
-	      order_by: :shard_index
-	    ),
-	  ]
+	      db_chunk = DecodeCoord.Repo.one(
+  	      from c in DecodeCoord.Objects.Chunk,
+	        join: s in DecodeCoord.Objects.Shard, on: c.id == s.chunk_id,
+	        where: s.digest == ^reconstruct_shard_digest,
+          limit: 1,
+	        preload: [
+	          :object,
+	          shards: ^from(
+	            s in DecodeCoord.Objects.Shard,
+	            order_by: :shard_index
+	          ),
+	        ]
         )
 
 	if db_chunk == nil do
@@ -287,6 +293,7 @@ defmodule DecodeCoord.Node do
 	    node_map: node_list,
 	  }
 
+    IO.puts "Reconstruct request payload: #{inspect request_payload}"
 	  {
 	    :shard_reconstruct_res,
 	    reconstruct_shard_digest,

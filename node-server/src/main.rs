@@ -185,7 +185,7 @@ async fn reconstruct_shard<'a>(
         .shard_map
         .iter()
         .enumerate()
-        .find(|(_idx, shard_spec)| shard_spec.digest == shard_digest_str)
+        .find(|(_idx, shard_spec)| shard_spec.digest.to_lowercase() == shard_digest_str)
         .map(|(idx, _shard_spec)| idx)
         .ok_or_else(|| {
             log::error!(
