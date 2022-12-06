@@ -10,7 +10,9 @@ defmodule DecodeCoord.Node do
     :metrics,
     :liveness_fail_count,
     :reconstruct_queue,
-    :reconstruct_tasks
+    :reconstruct_tasks,
+    :redistribute_queue,
+    :redistribute_tasks
   ]
 
   # GenServer client interface
@@ -83,6 +85,10 @@ defmodule DecodeCoord.Node do
     GenServer.call(pid, :get_url)
   end
 
+  def enqueue_redistribute(pid, shard_digest) do
+    GenServer.call(pid, {:enqueue_reconstruct, shard_digest})
+  end
+
   def enqueue_reconstruct(pid, shard_digest) do
     GenServer.call(pid, {:enqueue_reconstruct, shard_digest})
   end
@@ -112,7 +118,9 @@ defmodule DecodeCoord.Node do
       metrics: nil,
       liveness_fail_count: 0,
       reconstruct_queue: :queue.new(),
-      reconstruct_tasks: MapSet.new()
+      reconstruct_tasks: MapSet.new(),
+      redistribute_queue: :queue.new(),
+      redistribute_tasks: MapSet.new()
     }
 
     case register_res do
@@ -253,6 +261,64 @@ defmodule DecodeCoord.Node do
     end
   end
 
+  def issue_redistribute(state) do
+    parallel_redistribute_limit = 20
+
+    if MapSet.size(state.redistribute_tasks) <= parallel_redistribute_limit and
+         :queue.len(state.redistribute_queue) > 0 do
+      # Remove a shard from the queue to issue a redistribute request:
+      {{:value, redistribute_shard_digest}, popped_queue} = :queue.out(state.redistribute_queue)
+
+      # Run the request in an asynchronous task:
+      Task.async(fn ->
+        shard_nodes = DecodeCoord.ShardStore.nodes(redistribute_shard_digest)
+
+        if length(shard_nodes) > 0 do
+          [source_node | _] = shard_nodes
+
+          request_payload = %{
+            source_node: DecodeCoord.Node.get_url(source_node),
+            ticket: "TICKET"
+          }
+
+          {
+            :shard_redistribute_res,
+            redistribute_shard_digest,
+            Finch.build(
+              :post,
+              "#{state.node_url}/v0/shard/#{Base.encode16(redistribute_shard_digest)}/fetch",
+              [],
+              Jason.encode_to_iodata!(request_payload)
+            )
+            |> Finch.request(DecodeCoord.NodeClient,
+              pool_timeout: 600_000,
+              receive_timeout: 600_000
+            )
+          }
+        else
+          {
+            :shard_redistribute_res,
+            redistribute_shard_digest,
+            {:error, :no_source_node}
+          }
+        end
+      end)
+
+      {true,
+       %DecodeCoord.Node{
+         state
+         | redistribute_queue: popped_queue,
+           redistribute_tasks:
+             MapSet.put(
+               state.redistribute_tasks,
+               redistribute_shard_digest
+             )
+       }}
+    else
+      {false, state}
+    end
+  end
+
   def issue_reconstruct(state) do
     parallel_reconstruct_limit = 8
 
@@ -377,6 +443,22 @@ defmodule DecodeCoord.Node do
   end
 
   @impl true
+  def handle_call({:enqueue_redistribute, shard_digest}, _from, state) do
+    enqueued_state = %DecodeCoord.Node{
+      state
+      | redistribute_queue:
+          :queue.in(
+            shard_digest,
+            state.redistribute_queue
+          )
+    }
+
+    {_, processed_state} = issue_redistribute(enqueued_state)
+
+    {:reply, :ok, processed_state}
+  end
+
+  @impl true
   def handle_call({:enqueue_reconstruct, shard_digest}, _from, state) do
     enqueued_state = %DecodeCoord.Node{
       state
@@ -390,6 +472,47 @@ defmodule DecodeCoord.Node do
     {_, processed_state} = issue_reconstruct(enqueued_state)
 
     {:reply, :ok, processed_state}
+  end
+
+  @impl true
+  def handle_info(
+        {_ref, {:shard_redistribute_res, shard_digest, {:ok, %Finch.Response{status: 200}}}},
+        state
+      ) do
+    Logger.info("Redistributed shard #{Base.encode16(shard_digest)} successfully!")
+
+    # TODO: register shard for node
+
+    {_, new_state} = issue_redistribute(state)
+
+    {:noreply,
+     %DecodeCoord.Node{
+       new_state
+       | redistribute_tasks:
+           MapSet.delete(
+             state.redistribute_tasks,
+             shard_digest
+           )
+     }}
+  end
+
+  @impl true
+  def handle_info({_ref, {:shard_redistribute_res, shard_digest, request_result}}, state) do
+    Logger.error(
+      "Redistribution of shard #{Base.encode16(shard_digest)} failed: #{inspect(request_result)}"
+    )
+
+    {_, new_state} = issue_redistribute(state)
+
+    {:noreply,
+     %DecodeCoord.Node{
+       new_state
+       | redistribute_tasks:
+           MapSet.delete(
+             state.redistribute_tasks,
+             shard_digest
+           )
+     }}
   end
 
   @impl true
@@ -416,7 +539,7 @@ defmodule DecodeCoord.Node do
 
   @impl true
   def handle_info({_ref, {:shard_reconstruct_res, shard_digest, request_result}}, state) do
-    Logger.info(
+    Logger.error(
       "Reconstruction of shard #{Base.encode16(shard_digest)} failed: #{inspect(request_result)}"
     )
 

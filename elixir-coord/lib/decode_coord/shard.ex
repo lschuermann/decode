@@ -112,12 +112,6 @@ defmodule DecodeCoord.ShardStore do
           "#{inspect(remain_nodes)}."
       )
 
-      # TODO: it's possible that we have remaining nodes, but we've still lost
-      # fault tolerance. This can happen specifically when we have multiple
-      # identical shards in a chunk. In this case, we can also use
-      # redistribution to recover fault tolerance, but we use reconstruction for
-      # now:
-
       # We need to use a subquery to retrieve the chunk first, as we can have
       # multiple shards defined over the same digest. We need only perform the
       # reconstruction once per shard digest, not per database shard:
@@ -131,9 +125,8 @@ defmodule DecodeCoord.ShardStore do
         )
 
       # Try to select "twin" shards of the queried chunk. If we have at least
-      # one, we should retain `code_ratio_data` copies. This happens to report
-      # all twin shards, but most importantly does not return any shard if there
-      # is no twin shard in a chunk.
+      # one, we should retain `code_ratio_data` + `code_ratio_parity`
+      # copies.
       twin_chunk_shard =
         DecodeCoord.Repo.one(
           from s in DecodeCoord.Objects.Shard,
@@ -174,14 +167,14 @@ defmodule DecodeCoord.ShardStore do
                 "#{Base.encode16(shard_digest)} on."
             )
           else
-            [{reconstruct_node, _metrics} | _] = candidate_nodes
+            [{redistribute_node, _metrics} | _] = candidate_nodes
 
             Logger.debug(
-              "Reconstructing #{Base.encode16(shard_digest)}, originally on node " <>
-                "#{inspect(node_pid)}, onto node #{inspect(reconstruct_node)}."
+              "Redistributing #{Base.encode16(shard_digest)}, originally on node " <>
+                "#{inspect(node_pid)}, onto node #{inspect(redistribute_node)}."
             )
 
-            DecodeCoord.Node.enqueue_reconstruct(reconstruct_node, shard_digest)
+            DecodeCoord.Node.enqueue_redistribute(redistribute_node, shard_digest)
           end
         else
           Logger.debug(
