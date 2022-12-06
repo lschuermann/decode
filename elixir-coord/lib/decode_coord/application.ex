@@ -26,7 +26,7 @@ defmodule DecodeCoord.Application do
       # Start the node ranking
       %{id: DecodeCoord.NodeRank, start: {DecodeCoord.NodeRank, :start_link, []}},
       # Start a Finch HTTP client worker pool for connecting to nodes
-      {Finch, name: DecodeCoord.NodeClient}
+      {Finch, name: DecodeCoord.NodeClient, pools: %{default: [size: 100, count: 100]}}
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

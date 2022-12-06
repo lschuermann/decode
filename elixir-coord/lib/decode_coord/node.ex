@@ -86,7 +86,7 @@ defmodule DecodeCoord.Node do
   end
 
   def enqueue_redistribute(pid, shard_digest) do
-    GenServer.call(pid, {:enqueue_reconstruct, shard_digest})
+    GenServer.call(pid, {:enqueue_redistribute, shard_digest})
   end
 
   def enqueue_reconstruct(pid, shard_digest) do
@@ -161,14 +161,17 @@ defmodule DecodeCoord.Node do
     {:reply, :ok, %DecodeCoord.Node{state | node_url: node_url, shards: shards}}
   end
 
-  @impl true
-  def handle_call({:add_shard, shard_digest}, _from, state) do
+  defp _add_shard(shard_digest, state) do
     # Also populate the Shard registry with this node
     DecodeCoord.ShardStore.register_node(shard_digest)
 
     new_shards = [shard_digest | state.shards]
-    new_state = %DecodeCoord.Node{state | shards: new_shards}
-    {:reply, :ok, new_state}
+    %DecodeCoord.Node{state | shards: new_shards}
+  end
+
+  @impl true
+  def handle_call({:add_shard, shard_digest}, _from, state) do
+    {:reply, :ok, _add_shard(shard_digest, state)}
   end
 
   @impl true
@@ -262,23 +265,28 @@ defmodule DecodeCoord.Node do
   end
 
   def issue_redistribute(state) do
-    parallel_redistribute_limit = 20
+    parallel_redistribute_limit = 1
+
+    IO.puts "Issue redistribute, #{MapSet.size state.redistribute_tasks}"
 
     if MapSet.size(state.redistribute_tasks) <= parallel_redistribute_limit and
          :queue.len(state.redistribute_queue) > 0 do
       # Remove a shard from the queue to issue a redistribute request:
       {{:value, redistribute_shard_digest}, popped_queue} = :queue.out(state.redistribute_queue)
-
+      
+      started =
+      if not MapSet.member?(state.redistribute_tasks, redistribute_shard_digest) do
       # Run the request in an asynchronous task:
       Task.async(fn ->
         shard_nodes = DecodeCoord.ShardStore.nodes(redistribute_shard_digest)
 
         if length(shard_nodes) > 0 do
           [source_node | _] = shard_nodes
+          {:ok, node_url} = DecodeCoord.Node.get_url(source_node)
 
           request_payload = %{
-            source_node: DecodeCoord.Node.get_url(source_node),
-            ticket: "TICKET"
+            source_node: node_url,
+            ticket: "TICKET",
           }
 
           {
@@ -303,8 +311,12 @@ defmodule DecodeCoord.Node do
           }
         end
       end)
+        true
+      else
+        false
+      end
 
-      {true,
+      {started,
        %DecodeCoord.Node{
          state
          | redistribute_queue: popped_queue,
@@ -328,6 +340,8 @@ defmodule DecodeCoord.Node do
       {{:value, reconstruct_shard_digest}, popped_queue} = :queue.out(state.reconstruct_queue)
 
       # Run the request in an asynchronous task:
+      started =
+      if not MapSet.member?(state.reconstruct_tasks, reconstruct_shard_digest) do
       Task.async(fn ->
         # We fetch the shard of the chunk to reconstruct, in order to build its
         # shard_map as part of the reconstruct request. However, on the very
@@ -426,8 +440,12 @@ defmodule DecodeCoord.Node do
           }
         end
       end)
+        true
+      else
+        false
+      end
 
-      {true,
+      {started,
        %DecodeCoord.Node{
          state
          | reconstruct_queue: popped_queue,
@@ -477,83 +495,88 @@ defmodule DecodeCoord.Node do
   @impl true
   def handle_info(
         {_ref, {:shard_redistribute_res, shard_digest, {:ok, %Finch.Response{status: 200}}}},
-        state
+        state0
       ) do
     Logger.info("Redistributed shard #{Base.encode16(shard_digest)} successfully!")
 
-    # TODO: register shard for node
-
-    {_, new_state} = issue_redistribute(state)
-
-    {:noreply,
-     %DecodeCoord.Node{
-       new_state
+     state1 = %DecodeCoord.Node{
+       state0
        | redistribute_tasks:
            MapSet.delete(
-             state.redistribute_tasks,
+             state0.redistribute_tasks,
              shard_digest
            )
-     }}
+     }
+
+    state2 = _add_shard(shard_digest, state1)
+
+    {_, state3} = issue_redistribute(state2)
+
+    {:noreply, state3}
   end
 
   @impl true
-  def handle_info({_ref, {:shard_redistribute_res, shard_digest, request_result}}, state) do
+  def handle_info({_ref, {:shard_redistribute_res, shard_digest, request_result}}, state0) do
     Logger.error(
       "Redistribution of shard #{Base.encode16(shard_digest)} failed: #{inspect(request_result)}"
     )
 
-    {_, new_state} = issue_redistribute(state)
-
-    {:noreply,
-     %DecodeCoord.Node{
-       new_state
+     state1 = %DecodeCoord.Node{
+       state0
        | redistribute_tasks:
            MapSet.delete(
-             state.redistribute_tasks,
+             state0.redistribute_tasks,
              shard_digest
            )
-     }}
+     }
+    
+
+    {_, state2} = issue_redistribute(state1)
+
+    {:noreply, state2}
   end
 
   @impl true
   def handle_info(
         {_ref, {:shard_reconstruct_res, shard_digest, {:ok, %Finch.Response{status: 200}}}},
-        state
+        state0
       ) do
     Logger.info("Reconstructed shard #{Base.encode16(shard_digest)} successfully!")
-
-    # TODO: register shard for node
-
-    {_, new_state} = issue_reconstruct(state)
-
-    {:noreply,
-     %DecodeCoord.Node{
-       new_state
+     
+    state1 = %DecodeCoord.Node{
+       state0
        | reconstruct_tasks:
            MapSet.delete(
-             state.reconstruct_tasks,
+             state0.reconstruct_tasks,
              shard_digest
            )
-     }}
+    }
+
+    state2 = _add_shard(shard_digest, state1)
+
+    {_, state3} = issue_reconstruct(state2)
+
+    {:noreply, state3}
   end
 
   @impl true
-  def handle_info({_ref, {:shard_reconstruct_res, shard_digest, request_result}}, state) do
+  def handle_info({_ref, {:shard_reconstruct_res, shard_digest, request_result}}, state0) do
     Logger.error(
       "Reconstruction of shard #{Base.encode16(shard_digest)} failed: #{inspect(request_result)}"
     )
-
-    {_, new_state} = issue_reconstruct(state)
-
-    {:noreply,
-     %DecodeCoord.Node{
-       new_state
+    
+    state1 = %DecodeCoord.Node{
+       state0
        | reconstruct_tasks:
            MapSet.delete(
-             state.reconstruct_tasks,
+             state0.reconstruct_tasks,
              shard_digest
            )
-     }}
+    }
+
+    {_, state2} = issue_reconstruct(state1)
+
+    {:noreply, state2}
   end
 
   @impl true
