@@ -19,6 +19,8 @@ defmodule DecodeCoordWeb.Router do
       post "/object", ObjectController, :post
       get "/object/:object_id", ObjectController, :get
       put "/object/:object_id/finalize", ObjectController, :put
+
+      get "/failed_shards", ObjectController, :failed_shards
     end
   end
 

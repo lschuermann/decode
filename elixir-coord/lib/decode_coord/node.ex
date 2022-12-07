@@ -267,54 +267,55 @@ defmodule DecodeCoord.Node do
   def issue_redistribute(state) do
     parallel_redistribute_limit = 1
 
-    IO.puts "Issue redistribute, #{MapSet.size state.redistribute_tasks}"
+    IO.puts("Issue redistribute, #{MapSet.size(state.redistribute_tasks)}")
 
     if MapSet.size(state.redistribute_tasks) <= parallel_redistribute_limit and
          :queue.len(state.redistribute_queue) > 0 do
       # Remove a shard from the queue to issue a redistribute request:
       {{:value, redistribute_shard_digest}, popped_queue} = :queue.out(state.redistribute_queue)
-      
+
       started =
-      if not MapSet.member?(state.redistribute_tasks, redistribute_shard_digest) do
-      # Run the request in an asynchronous task:
-      Task.async(fn ->
-        shard_nodes = DecodeCoord.ShardStore.nodes(redistribute_shard_digest)
+        if not MapSet.member?(state.redistribute_tasks, redistribute_shard_digest) do
+          # Run the request in an asynchronous task:
+          Task.async(fn ->
+            shard_nodes = DecodeCoord.ShardStore.nodes(redistribute_shard_digest)
 
-        if length(shard_nodes) > 0 do
-          [source_node | _] = shard_nodes
-          {:ok, node_url} = DecodeCoord.Node.get_url(source_node)
+            if length(shard_nodes) > 0 do
+              [source_node | _] = shard_nodes
+              {:ok, node_url} = DecodeCoord.Node.get_url(source_node)
 
-          request_payload = %{
-            source_node: node_url,
-            ticket: "TICKET",
-          }
+              request_payload = %{
+                source_node: node_url,
+                ticket: "TICKET"
+              }
 
-          {
-            :shard_redistribute_res,
-            redistribute_shard_digest,
-            Finch.build(
-              :post,
-              "#{state.node_url}/v0/shard/#{Base.encode16(redistribute_shard_digest)}/fetch",
-              [],
-              Jason.encode_to_iodata!(request_payload)
-            )
-            |> Finch.request(DecodeCoord.NodeClient,
-              pool_timeout: 600_000,
-              receive_timeout: 600_000
-            )
-          }
+              {
+                :shard_redistribute_res,
+                redistribute_shard_digest,
+                Finch.build(
+                  :post,
+                  "#{state.node_url}/v0/shard/#{Base.encode16(redistribute_shard_digest)}/fetch",
+                  [],
+                  Jason.encode_to_iodata!(request_payload)
+                )
+                |> Finch.request(DecodeCoord.NodeClient,
+                  pool_timeout: 600_000,
+                  receive_timeout: 600_000
+                )
+              }
+            else
+              {
+                :shard_redistribute_res,
+                redistribute_shard_digest,
+                {:error, :no_source_node}
+              }
+            end
+          end)
+
+          true
         else
-          {
-            :shard_redistribute_res,
-            redistribute_shard_digest,
-            {:error, :no_source_node}
-          }
+          false
         end
-      end)
-        true
-      else
-        false
-      end
 
       {started,
        %DecodeCoord.Node{
@@ -341,109 +342,110 @@ defmodule DecodeCoord.Node do
 
       # Run the request in an asynchronous task:
       started =
-      if not MapSet.member?(state.reconstruct_tasks, reconstruct_shard_digest) do
-      Task.async(fn ->
-        # We fetch the shard of the chunk to reconstruct, in order to build its
-        # shard_map as part of the reconstruct request. However, on the very
-        # last chunk, the chunk size may actually be less than the chunk_size
-        # parameter of the object. Hence we also join this with the next chunk
-        # and if there is not successor, we need to calculate the actual chunk
-        # size:
-        [db_chunk, has_successor] =
-          DecodeCoord.Repo.one(
-            from c in DecodeCoord.Objects.Chunk,
-              join: s in DecodeCoord.Objects.Shard,
-              on: c.id == s.chunk_id,
-              left_join: c_succ in DecodeCoord.Objects.Chunk,
-              on: c_succ.object_id == c.object_id and c_succ.chunk_index == c.chunk_index + 1,
-              where: s.digest == ^reconstruct_shard_digest,
-              limit: 1,
-              preload: [
-                :object,
-                shards:
-                  ^from(
-                    s in DecodeCoord.Objects.Shard,
-                    order_by: :shard_index
-                  )
-              ],
-              select: [c, not is_nil(c_succ)]
-          )
-
-        if db_chunk == nil do
-          Logger.error(
-            "Don't have any chunk corresponding to shard " <>
-              "#{Base.encode16(reconstruct_shard_digest)}, ignoring!"
-          )
-
-          {
-            :shard_reconstruct_res,
-            reconstruct_shard_digest,
-            :no_chunk
-          }
-        else
-          {shard_map, {_node_map, node_inv_map}} =
-            DecodeCoord.Objects.Chunk.build_shard_map(db_chunk)
-
-          # node_inv_map maps an a sequential and non-sparse sequence of nodes
-          # to their PID and URL. Walk the indices and convert it into a list to
-          # return to the client:
-          node_list =
-            for idx <- 0..(map_size(node_inv_map) - 1)//1 do
-              {_pid, url} = Map.get(node_inv_map, idx)
-              url
-            end
-
-          {chunk_size, shard_size} =
-            if not has_successor do
-              Logger.debug(
-                "Chunk #{Base.encode16(reconstruct_shard_digest)} has no " <>
-                  "successor, so it may be smaller than object's chunk_size " <>
-                  "of #{db_chunk.object.chunk_size}."
+        if not MapSet.member?(state.reconstruct_tasks, reconstruct_shard_digest) do
+          Task.async(fn ->
+            # We fetch the shard of the chunk to reconstruct, in order to build its
+            # shard_map as part of the reconstruct request. However, on the very
+            # last chunk, the chunk size may actually be less than the chunk_size
+            # parameter of the object. Hence we also join this with the next chunk
+            # and if there is not successor, we need to calculate the actual chunk
+            # size:
+            [db_chunk, has_successor] =
+              DecodeCoord.Repo.one(
+                from c in DecodeCoord.Objects.Chunk,
+                  join: s in DecodeCoord.Objects.Shard,
+                  on: c.id == s.chunk_id,
+                  left_join: c_succ in DecodeCoord.Objects.Chunk,
+                  on: c_succ.object_id == c.object_id and c_succ.chunk_index == c.chunk_index + 1,
+                  where: s.digest == ^reconstruct_shard_digest,
+                  limit: 1,
+                  preload: [
+                    :object,
+                    shards:
+                      ^from(
+                        s in DecodeCoord.Objects.Shard,
+                        order_by: :shard_index
+                      )
+                  ],
+                  select: [c, not is_nil(c_succ)]
               )
 
-              chunk_size =
-                rem(
-                  db_chunk.object.size,
-                  db_chunk.object.chunk_size
-                )
+            if db_chunk == nil do
+              Logger.error(
+                "Don't have any chunk corresponding to shard " <>
+                  "#{Base.encode16(reconstruct_shard_digest)}, ignoring!"
+              )
 
-              shard_size = min(chunk_size, db_chunk.object.shard_size)
-              {chunk_size, shard_size}
+              {
+                :shard_reconstruct_res,
+                reconstruct_shard_digest,
+                :no_chunk
+              }
             else
-              {db_chunk.object.chunk_size, db_chunk.object.shard_size}
+              {shard_map, {_node_map, node_inv_map}} =
+                DecodeCoord.Objects.Chunk.build_shard_map(db_chunk)
+
+              # node_inv_map maps an a sequential and non-sparse sequence of nodes
+              # to their PID and URL. Walk the indices and convert it into a list to
+              # return to the client:
+              node_list =
+                for idx <- 0..(map_size(node_inv_map) - 1)//1 do
+                  {_pid, url} = Map.get(node_inv_map, idx)
+                  url
+                end
+
+              {chunk_size, shard_size} =
+                if not has_successor do
+                  Logger.debug(
+                    "Chunk #{Base.encode16(reconstruct_shard_digest)} has no " <>
+                      "successor, so it may be smaller than object's chunk_size " <>
+                      "of #{db_chunk.object.chunk_size}."
+                  )
+
+                  chunk_size =
+                    rem(
+                      db_chunk.object.size,
+                      db_chunk.object.chunk_size
+                    )
+
+                  shard_size = min(chunk_size, db_chunk.object.shard_size)
+                  {chunk_size, shard_size}
+                else
+                  {db_chunk.object.chunk_size, db_chunk.object.shard_size}
+                end
+
+              request_payload = %{
+                chunk_size: chunk_size,
+                shard_size: shard_size,
+                code_ratio_data: db_chunk.object.code_ratio_data,
+                code_ratio_parity: db_chunk.object.code_ratio_parity,
+                shard_map: shard_map,
+                node_map: node_list
+              }
+
+              IO.puts("Reconstruct request payload: #{inspect(request_payload)}")
+
+              {
+                :shard_reconstruct_res,
+                reconstruct_shard_digest,
+                Finch.build(
+                  :post,
+                  "#{state.node_url}/v0/shard/#{Base.encode16(reconstruct_shard_digest)}/reconstruct",
+                  [],
+                  Jason.encode_to_iodata!(request_payload)
+                )
+                |> Finch.request(DecodeCoord.NodeClient,
+                  pool_timeout: 600_000,
+                  receive_timeout: 600_000
+                )
+              }
             end
+          end)
 
-          request_payload = %{
-            chunk_size: chunk_size,
-            shard_size: shard_size,
-            code_ratio_data: db_chunk.object.code_ratio_data,
-            code_ratio_parity: db_chunk.object.code_ratio_parity,
-            shard_map: shard_map,
-            node_map: node_list
-          }
-
-          IO.puts("Reconstruct request payload: #{inspect(request_payload)}")
-
-          {
-            :shard_reconstruct_res,
-            reconstruct_shard_digest,
-            Finch.build(
-              :post,
-              "#{state.node_url}/v0/shard/#{Base.encode16(reconstruct_shard_digest)}/reconstruct",
-              [],
-              Jason.encode_to_iodata!(request_payload)
-            )
-            |> Finch.request(DecodeCoord.NodeClient,
-              pool_timeout: 600_000,
-              receive_timeout: 600_000
-            )
-          }
+          true
+        else
+          false
         end
-      end)
-        true
-      else
-        false
-      end
 
       {started,
        %DecodeCoord.Node{
@@ -499,14 +501,14 @@ defmodule DecodeCoord.Node do
       ) do
     Logger.info("Redistributed shard #{Base.encode16(shard_digest)} successfully!")
 
-     state1 = %DecodeCoord.Node{
-       state0
-       | redistribute_tasks:
-           MapSet.delete(
-             state0.redistribute_tasks,
-             shard_digest
-           )
-     }
+    state1 = %DecodeCoord.Node{
+      state0
+      | redistribute_tasks:
+          MapSet.delete(
+            state0.redistribute_tasks,
+            shard_digest
+          )
+    }
 
     state2 = _add_shard(shard_digest, state1)
 
@@ -521,15 +523,14 @@ defmodule DecodeCoord.Node do
       "Redistribution of shard #{Base.encode16(shard_digest)} failed: #{inspect(request_result)}"
     )
 
-     state1 = %DecodeCoord.Node{
-       state0
-       | redistribute_tasks:
-           MapSet.delete(
-             state0.redistribute_tasks,
-             shard_digest
-           )
-     }
-    
+    state1 = %DecodeCoord.Node{
+      state0
+      | redistribute_tasks:
+          MapSet.delete(
+            state0.redistribute_tasks,
+            shard_digest
+          )
+    }
 
     {_, state2} = issue_redistribute(state1)
 
@@ -542,14 +543,14 @@ defmodule DecodeCoord.Node do
         state0
       ) do
     Logger.info("Reconstructed shard #{Base.encode16(shard_digest)} successfully!")
-     
+
     state1 = %DecodeCoord.Node{
-       state0
-       | reconstruct_tasks:
-           MapSet.delete(
-             state0.reconstruct_tasks,
-             shard_digest
-           )
+      state0
+      | reconstruct_tasks:
+          MapSet.delete(
+            state0.reconstruct_tasks,
+            shard_digest
+          )
     }
 
     state2 = _add_shard(shard_digest, state1)
@@ -564,14 +565,14 @@ defmodule DecodeCoord.Node do
     Logger.error(
       "Reconstruction of shard #{Base.encode16(shard_digest)} failed: #{inspect(request_result)}"
     )
-    
+
     state1 = %DecodeCoord.Node{
-       state0
-       | reconstruct_tasks:
-           MapSet.delete(
-             state0.reconstruct_tasks,
-             shard_digest
-           )
+      state0
+      | reconstruct_tasks:
+          MapSet.delete(
+            state0.reconstruct_tasks,
+            shard_digest
+          )
     }
 
     {_, state2} = issue_reconstruct(state1)

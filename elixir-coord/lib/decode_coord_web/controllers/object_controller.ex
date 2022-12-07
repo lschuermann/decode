@@ -9,6 +9,13 @@ defmodule DecodeCoordWeb.ObjectController do
     div(a + b - 1, b)
   end
 
+  # GET /v0/failed_shards
+  def failed_shards(conn, _params) do
+    conn
+    |> put_status(:ok)
+    |> render("failed_shard_list.json", failed_shard_set: DecodeCoord.ShardStore.failed_shards())
+  end
+
   # POST /v0/object/
   def post(conn, %{"object_size" => object_size} = _params) do
     object_id = UUID.uuid4()

@@ -3,6 +3,10 @@ defmodule DecodeCoord.ShardStore do
   use GenServer
   import Ecto.Query
 
+  defstruct [
+    :failed_shards
+  ]
+
   # GenServer client API
 
   def start_link() do
@@ -10,6 +14,8 @@ defmodule DecodeCoord.ShardStore do
   end
 
   def register_node(shard_digest) do
+    # TODO: actually validate that we have a sufficient number of shards now
+    GenServer.call(DecodeCoord.ShardStore, {:add_shard, shard_digest})
     DecodeCoord.ShardStore.WrappedNode.start(self(), shard_digest)
   end
 
@@ -41,6 +47,10 @@ defmodule DecodeCoord.ShardStore do
       DecodeCoord.NodeMetrics.rank_download(metrics)
     end)
     |> Enum.map(fn {pid, _} -> pid end)
+  end
+
+  def failed_shards() do
+    GenServer.call(DecodeCoord.ShardStore, :get_failed_shards)
   end
 
   def __shard_node_down(wrapper_node_pid, node_pid, shard_digest) do
@@ -112,6 +122,8 @@ defmodule DecodeCoord.ShardStore do
           "#{inspect(remain_nodes)}."
       )
 
+      GenServer.call(DecodeCoord.ShardStore, {:set_shard_failed, shard_digest})
+
       # We need to use a subquery to retrieve the chunk first, as we can have
       # multiple shards defined over the same digest. We need only perform the
       # reconstruction once per shard digest, not per database shard:
@@ -148,6 +160,8 @@ defmodule DecodeCoord.ShardStore do
             "Shard #{Base.encode16(shard_digest)} has twins in the same " <>
               "chunk and is missing copies, reconstructing."
           )
+
+          GenServer.call(DecodeCoord.ShardStore, {:set_shard_failed, shard_digest})
 
           # TODO: perhaps schedule reconstruction on more than one node if we
           # know we're missing multiple?
@@ -203,7 +217,27 @@ defmodule DecodeCoord.ShardStore do
     # is going to be registered under the application supervisor:
     Registry.start_link(keys: :duplicate, name: DecodeCoord.ShardStore.Registry)
 
-    {:ok, nil}
+    {:ok, %DecodeCoord.ShardStore{failed_shards: MapSet.new()}}
+  end
+
+  @impl true
+  def handle_call({:add_shard, shard_digest}, _from, state) do
+    {:reply, :ok,
+     %DecodeCoord.ShardStore{
+       state
+       | failed_shards: MapSet.delete(state.failed_shards, shard_digest)
+     }}
+  end
+
+  @impl true
+  def handle_call({:set_shard_failed, shard_digest}, _from, state) do
+    {:reply, :ok,
+     %DecodeCoord.ShardStore{state | failed_shards: MapSet.put(state.failed_shards, shard_digest)}}
+  end
+
+  @impl true
+  def handle_call(:get_failed_shards, _from, state) do
+    {:reply, state.failed_shards, state}
   end
 
   defmodule WrappedNode do

@@ -2,6 +2,10 @@ defmodule DecodeCoordWeb.ObjectView do
   use DecodeCoordWeb, :view
   alias DecodeCoordWeb.ObjectView
 
+  def render("failed_shard_list.json", %{failed_shard_set: failed_shard_set}) do
+    failed_shard_set |> Enum.to_list()
+  end
+
   def render("object_retrieval_map.json", %{
         object: object,
         shard_map: shard_map,
