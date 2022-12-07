@@ -704,17 +704,34 @@ async fn post_shard(
 }
 
 #[get("/stats")]
-async fn get_statistics(state: &State<Arc<NodeServerState>>) -> Json<node_api::NodeStatistics> {
+async fn get_metrics(state: &State<Arc<NodeServerState>>) -> Json<node_api::NodeStatistics> {
     (*state.last_stats_query.lock().unwrap()) = Instant::now();
 
-    Json(node_api::NodeStatistics {
-        bandwidth: 42,
-        cpu_usage: 0,
-        disk_usage: 9001, // over 9000
-        load_avg: 0.5,
-        disk_capacity: 1099511627776,
-        disk_free: 549755813888,
+    let shard_store_path = state.shard_store.path();
+
+    let metrics = tokio::task::spawn_blocking(move || {
+        let cpu_info = procfs::CpuInfo::new().unwrap();
+        let load_avg = procfs::LoadAverage::new().unwrap();
+
+        let mut normalized_load_avg = load_avg.one / cpu_info.cpus.len() as f32;
+        if normalized_load_avg > 1.0 {
+            normalized_load_avg = 1.0;
+        }
+
+        let bytes_used = fs_extra::dir::get_size(&shard_store_path).unwrap();
+        let bytes_free = fs2::available_space(&shard_store_path).unwrap();
+        let capacity = bytes_used + bytes_free;
+
+        node_api::NodeStatistics {
+            load_avg: normalized_load_avg,
+            disk_capacity: capacity,
+            disk_free: bytes_free,
+        }
     })
+    .await
+    .unwrap();
+
+    Json(metrics)
 }
 
 async fn initial_server_state(
@@ -861,7 +878,7 @@ async fn rocket() -> _ {
                 post_shard,
                 fetch_shard,
                 reconstruct_shard,
-                get_statistics,
+                get_metrics,
             ],
         )
         .manage(node_server_state)
