@@ -3,7 +3,9 @@ defmodule DecodeCoordWeb.ObjectView do
   alias DecodeCoordWeb.ObjectView
 
   def render("failed_shard_list.json", %{failed_shard_set: failed_shard_set}) do
-    failed_shard_set |> Enum.to_list()
+    failed_shard_set
+    |> Enum.map(fn binary_digest -> Base.encode16 binary_digest end)
+    |> Enum.to_list()
   end
 
   def render("object_retrieval_map.json", %{

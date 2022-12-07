@@ -65,6 +65,8 @@ defmodule DecodeCoord.ShardStore do
     if length(remain_nodes) < 1 do
       Logger.warn("No remaining nodes for shard #{Base.encode16(shard_digest)}!")
 
+      GenServer.call(DecodeCoord.ShardStore, {:set_shard_failed, shard_digest})
+
       # Select a node for placing the shard, respecting the other shards in the
       # chunk to retain fault tolerance. We need to use a subquery to retrieve
       # the chunk first, as we can have multiple shards defined over the same
@@ -121,8 +123,6 @@ defmodule DecodeCoord.ShardStore do
         "Remaining nodes for shard #{Base.encode16(shard_digest)}: " <>
           "#{inspect(remain_nodes)}."
       )
-
-      GenServer.call(DecodeCoord.ShardStore, {:set_shard_failed, shard_digest})
 
       # We need to use a subquery to retrieve the chunk first, as we can have
       # multiple shards defined over the same digest. We need only perform the
