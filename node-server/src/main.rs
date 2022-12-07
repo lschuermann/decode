@@ -101,6 +101,20 @@ impl<'r, 'a: 'r, const N: usize> Responder<'r, 'a> for ShardResponse<'a, N> {
     }
 }
 
+#[get("/shard")]
+async fn list_shards<'a>(state: &State<Arc<NodeServerState>>) -> Json<Vec<String>> {
+    use futures::stream::StreamExt;
+
+    Json(
+        state
+            .shard_store
+            .iter_shards()
+            .map(|digest| hex::encode(&digest))
+            .collect()
+            .await,
+    )
+}
+
 #[post("/shard/<shard_digest>/reconstruct", data = "<reconstruct_map>")]
 async fn reconstruct_shard<'a>(
     shard_digest: HexDigest<32>,
@@ -874,6 +888,7 @@ async fn rocket() -> _ {
         .mount(
             "/v0/",
             routes![
+                list_shards,
                 get_shard,
                 post_shard,
                 fetch_shard,
