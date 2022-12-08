@@ -3,7 +3,7 @@
     name: localuser
     comment: Local user with ephemeral home directory
     uid: 500
-    group: 7865
+    group: "{{ group_id }}"
     groups: root
     shell: /bin/bash
     create_home: true

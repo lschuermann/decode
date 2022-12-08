@@ -1,3 +1,17 @@
+- name: Setup shared SSH keys
+  hosts: 127.0.0.1
+  connection: local
+  tasks:
+    - name: Check whether shared SSH key is generated
+      stat:
+        path: /tmp/id_decode_test
+      register: shared_ssh_key_exists
+
+    - name: Generate shared SSH key
+      shell: |
+        ssh-keygen -t ed25519 -C "noise-cloudlab-benchmark" -f /tmp/id_decode_test -q -N ""
+      when: not shared_ssh_key_exists.stat.exists
+
 - hosts: all
   roles:
     - role: local_user
@@ -14,12 +28,9 @@
 
 - hosts: decode-coord
   roles:
-    # - role: coord
-    #   become: yes
-    #   become_user: localuser
-    # - role: elixir-coord
-    #   become: yes
-    #   become_user: localuser
+    - role: elixir-coord
+      become: yes
+      become_user: localuser
 
 - hosts: decode-client
   roles:

@@ -1,3 +1,5 @@
+// TODO: handle divide by zero in untrusted data (e.g. shard size on reconstruct :D)
+
 #[macro_use]
 extern crate rocket;
 

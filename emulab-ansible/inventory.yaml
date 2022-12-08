@@ -1,26 +1,32 @@
 all:
   vars:
-    decode_git_rev: 85681519ca495d512a26f2571ca945f67f8e13d1
+    decode_git_rev: 55a243ca3221efe5e2534128638aca7ff83844af
+    group_id: cos518f22-PG0
+    node_count: 6
   hosts:
   children:
     decode-node:
       vars:
-        coord_url: "http://node3:4000/"
+        coord_url: "http://node5:4000/"
       hosts:
-        ms0302.utah.cloudlab.us:
+        pc14.cloudlab.umass.edu:
           internal_hostname: node0
-        ms0340.utah.cloudlab.us:
+        pc07.cloudlab.umass.edu:
           internal_hostname: node1
-        ms0316.utah.cloudlab.us:
+        pc16.cloudlab.umass.edu:
           internal_hostname: node2
+        pc13.cloudlab.umass.edu:
+          internal_hostname: node3
+        pc12.cloudlab.umass.edu:
+          internal_hostname: node4
 
     decode-coord:
       hosts:
-        ms0309.utah.cloudlab.us:
-          internal_hostname: node3
+        pc08.cloudlab.umass.edu:
+          internal_hostname: node5
 
     decode-client:
       hosts:
-        ms0309.utah.cloudlab.us:
-          internal_hostname: node3
+        pc08.cloudlab.umass.edu:
+          internal_hostname: node5
 

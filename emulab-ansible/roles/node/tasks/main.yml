@@ -19,9 +19,10 @@
     src: /node-uuid
   register: slurped_uuid
 
-- name: Patch out the simd-accel option from decode-rs
-  shell: |
-    sed -e 's/, features = \["simd-accel"\]//g' -i /localdisk/localuser/decode/decode-rs/Cargo.toml
+# Required for older hosts:
+# - name: Patch out the simd-accel option from decode-rs
+#   shell: |
+#     sed -e 's/, features = \["simd-accel"\]//g' -i /localdisk/localuser/decode/decode-rs/Cargo.toml
 
 - name: Build the node-server application binary
   shell: |
@@ -34,7 +35,7 @@
     dest: /localdisk/localuser/decode/node-server/DecodeNode.toml
     content: |
       # Basic Server Configuration
-      public_url = "http://{{ internal_ip }}:8000"
+      public_url = "http://{{ internal_hostname }}:8000"
       coordinator_url = "{{ coord_url }}"
       node_id = "{{ slurped_uuid.content | b64decode | trim }}"
       shards_path = "./shards"

@@ -13,7 +13,9 @@ defmodule DecodeCoordWeb.ObjectController do
   def failed_shards(conn, _params) do
     conn
     |> put_status(:ok)
-    |> render("failed_shard_list.json", failed_shard_set: DecodeCoord.ShardStore.failed_shards())
+    |> render("failed_shard_list.json",
+      failed_shard_set: DecodeCoord.ShardStore.pending_reconstruct()
+    )
   end
 
   # POST /v0/object/
@@ -35,7 +37,7 @@ defmodule DecodeCoordWeb.ObjectController do
             0..(num_data_shards + num_parity_shards - 1),
             MapSet.new(),
             fn _shard_index, excluded_nodes ->
-              {:ok, nodes} = DecodeCoord.NodeRank.get_nodes(1, excluded_nodes)
+              nodes = DecodeCoord.NodeRank.get_nodes(1, excluded_nodes)
 
               if length(nodes) > 0 do
                 [{node_pid, _metrics} | _] = nodes
@@ -79,8 +81,8 @@ defmodule DecodeCoordWeb.ObjectController do
             "chunk_size" => chunk_size,
             "shard_size" => shard_size,
             "code_ratio_data" => code_ratio_data,
-            "code_ratio_parity" => code_ratio_parity,
-            "shard_map" => shard_map
+            "code_ratio_parity" => code_ratio_parity
+            # "shard_map" => shard_map
           }
         } = _params
       ) do

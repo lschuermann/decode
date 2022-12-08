@@ -63,7 +63,7 @@ defmodule DecodeCoord.NodeRank do
       end)
       |> Enum.to_list()
 
-    {:reply, {:ok, ranked_nodes}, state}
+    {:reply, ranked_nodes, state}
   end
 
   @impl true

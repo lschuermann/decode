@@ -1,4 +1,80 @@
-# Install rustup
+- name: Download a version of pyOpenSSL which works with the version of OpenSSL distributed on Ubuntu 22.04
+  become: yes
+  become_user: root
+  get_url:
+    url: https://files.pythonhosted.org/packages/00/3f/ea5cfb789dddb327e6d2cf9377c36d9d8607af85530af0e7001165587ae7/pyOpenSSL-22.1.0-py3-none-any.whl
+    dest: /root/pyOpenSSL-22.1.0-py3-none-any.whl
+  register: pyopenssl_download
+
+- name: Install pyOpenSSL
+  become: yes
+  become_user: root
+  shell: |
+    python3 -m easy_install /root/pyOpenSSL-22.1.0-py3-none-any.whl
+  when:
+    pyopenssl_download.changed
+
+- name: Install nftables
+  become: yes
+  become_user: root
+  apt:
+    name: nftables
+    state: present
+
+- name: Copy nftables ruleset
+  become: yes
+  become_user: root
+  copy:
+    dest: /etc/nftables.conf
+    content: |
+      #!/usr/sbin/nft -f
+      flush ruleset
+
+      table inet filter {
+        {% for n in range(0, node_count) %}
+        counter node{{ n }}-input {}
+        counter node{{ n }}-output {}
+        {% endfor %}
+
+        chain input {
+          type filter hook input priority 0; policy accept;
+          {% for n in range(0, node_count) %}
+            ip saddr 10.10.1.{{ n + 1 }} counter name node{{ n }}-input;
+          {% endfor %}
+        }
+
+        chain forward {
+          type filter hook forward priority 0; policy drop;
+        }
+
+        chain output {
+          type filter hook output priority 0; policy accept;
+
+          {% for n in range(0, node_count) %}
+            ip daddr 10.10.1.{{ n + 1 }} counter name node{{ n }}-output;
+          {% endfor %}
+        }
+      }
+  register: nftables_config
+
+- name: Apply firewall config
+  become: yes
+  become_user: root
+  command: nft -f /etc/nftables.conf
+  # when: nftables_config.changed
+
+- name: Create SSH directory
+  file:
+    path: /localdisk/localuser/.ssh
+    state: directory
+    mode: '0700'
+
+- name: Enable SSH access to localuser using shared key
+  copy:
+    src: /tmp/id_noise_bench.pub
+    dest: /localdisk/localuser/.ssh/authorized_keys
+    mode: '0600'
+    force: true
 
 - name: Check whether rustup is installed
   shell: |
@@ -22,5 +98,11 @@
     version: "{{ decode_git_rev }}"
     clone: yes
     update: yes
-    force: yes
+    # force: yes
   register: decode_git
+
+- name: Build the client application binary
+  shell: |
+    . /localdisk/localuser/.cargo/env
+    cd /localdisk/localuser/decode/client
+    cargo build --release
