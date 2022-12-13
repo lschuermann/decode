@@ -9,7 +9,13 @@ import Config
 
 config :decode_coord,
   ecto_repos: [DecodeCoord.Repo],
-  generators: [binary_id: true]
+  generators: [binary_id: true],
+  max_chunk_size: 50 * 1024 * 1024,
+  min_shard_size: 5 * 1024 * 1024,
+  max_data_shards: 2,
+  num_parity_shards: 1,
+  parallel_reconstruct_limit: 1
+  parallel_redistribute_limit: 1
 
 # Configures the endpoint
 config :decode_coord, DecodeCoordWeb.Endpoint,

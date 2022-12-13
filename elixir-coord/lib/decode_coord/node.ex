@@ -325,8 +325,8 @@ defmodule DecodeCoord.Node do
       reconstruct_tasks: MapSet.new(),
       redistribute_queue: :queue.new(),
       redistribute_tasks: MapSet.new(),
-      parallel_reconstruct_limit: 1,
-      parallel_redistribute_limit: 1
+      parallel_reconstruct_limit: Application.fetch_env!(:decode_coord, :parallel_reconstruct_limit),
+      parallel_redistribute_limit: Application.fetch_env!(:decode_coord, :parallel_redistribute_limit)
     }
 
     case register_res do
