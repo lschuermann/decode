@@ -21,11 +21,11 @@ defmodule DecodeCoordWeb.ObjectController do
   # POST /v0/object/
   def post(conn, %{"object_size" => object_size} = _params) do
     object_id = UUID.uuid4()
-    # max_chunk_size = 50 * 1024 * 1024
-		max_chunk_size = Application.fetch_env!(:decode_coord, :max_chunk_size)
+		max_shard_size = Application.fetch_env!(:decode_coord, :max_shard_size)
     min_shard_size = Application.fetch_env!(:decode_coord, :min_shard_size)
     max_data_shards = Application.fetch_env!(:decode_coord, :max_data_shards)
     num_parity_shards = Application.fetch_env!(:decode_coord, :num_parity_shards)
+    max_chunk_size = max_shard_size * max_data_shards
     num_chunk = ceil_div_int(object_size, max_chunk_size)
     size_chunk = ceil_div_int(object_size, num_chunk)
     num_data_shards = min(ceil_div_int(size_chunk, min_shard_size), max_data_shards)
