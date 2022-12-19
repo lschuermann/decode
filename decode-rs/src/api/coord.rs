@@ -497,7 +497,7 @@ pub enum NodeRegisterResponse<'desc, 'resp_body> {
 
 impl<'desc, 'resp_body> NodeRegisterResponse<'desc, 'resp_body> {
     pub fn from_bytes<'a: 'desc + 'resp_body>(bytes: &'a [u8]) -> Self {
-        // Success (200) response should have an empty payload:
+        // Success (204) response should have an empty payload:
         if bytes.len() == 0 {
             NodeRegisterResponse::Success
         } else {
@@ -522,7 +522,7 @@ impl<'desc, 'resp_body> NodeRegisterResponse<'desc, 'resp_body> {
         // the expected HTTP response code matches the passed one. If
         // not, return an [`APIError::InvalidResponse`].
         let expected_status = match parsed {
-            NodeRegisterResponse::Success => Some(NonZeroU16::new(200).unwrap()),
+            NodeRegisterResponse::Success => Some(NonZeroU16::new(204).unwrap()),
             NodeRegisterResponse::APIError(ref err) => err.http_status_code(),
         };
 

@@ -494,6 +494,10 @@ impl<const N: usize> ShardStore<N> {
                 digest
             })
     }
+
+    pub fn path(&self) -> PathBuf {
+        self.base_path.clone()
+    }
 }
 
 impl<const N: usize> Drop for ShardStore<N> {

@@ -1,3 +1,5 @@
+// TODO: handle divide by zero in untrusted data (e.g. shard size on reconstruct :D)
+
 #[macro_use]
 extern crate rocket;
 
@@ -51,7 +53,7 @@ struct NodeServerState {
     shard_store: Arc<shard_store::ShardStore<32>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct HexDigest<const N: usize> {
     digest: [u8; N],
 }
@@ -99,6 +101,20 @@ impl<'r, 'a: 'r, const N: usize> Responder<'r, 'a> for ShardResponse<'a, N> {
             .streamed_body(self.0)
             .ok()
     }
+}
+
+#[get("/shard")]
+async fn list_shards<'a>(state: &State<Arc<NodeServerState>>) -> Json<Vec<String>> {
+    use futures::stream::StreamExt;
+
+    Json(
+        state
+            .shard_store
+            .iter_shards()
+            .map(|digest| hex::encode(&digest))
+            .collect()
+            .await,
+    )
 }
 
 #[post("/shard/<shard_digest>/reconstruct", data = "<reconstruct_map>")]
@@ -180,18 +196,30 @@ async fn reconstruct_shard<'a>(
 
     // Our target shard must be part of the set of shards, search for it and
     // determine its index:
-    let shard_digest_str = shard_digest.to_string();
+    // let shard_digest_str = shard_digest.to_string().to_lowercase();
     let target_shard_idx = reconstruct_map
         .shard_map
         .iter()
         .enumerate()
-        .find(|(_idx, shard_spec)| shard_spec.digest == shard_digest_str)
+        .find(|(shard_idx, shard_spec)| {
+            HexDigest::from_str(&shard_spec.digest)
+                .map(|hd| hd == shard_digest)
+                .unwrap_or_else(|_| {
+                    log::warn!(
+                        "Unable to parse digest from shard spec {}: \"{}\"",
+                        shard_idx,
+                        &shard_spec.digest,
+                    );
+                    false
+                })
+        })
         .map(|(idx, _shard_spec)| idx)
         .ok_or_else(|| {
             log::error!(
                 "Received reconstruct request, but target shard ({:?}) is not in \
-	     the set of shards of the to-be reconstructed object.",
+		 the set of shards of the to-be reconstructed object: {:?}.",
                 shard_digest,
+                reconstruct_map.shard_map,
             );
             error::APIError::InternalServerError
         })?;
@@ -354,12 +382,25 @@ async fn reconstruct_shard<'a>(
                     use tokio::io::AsyncWriteExt;
 
                     while let Some(res) = stream.next().await {
-                        let mut buffer = res.map_err(|e| Err(Ok(e)))?;
-                        writer
-                            .write_all_buf(&mut buffer)
-                            .await
-                            .map_err(|e| Err(Err(e)))?;
+                        match res {
+                            Err(e) => {
+                                log::warn!("Shard download error: {:?}", e);
+                                writer.shutdown().await.unwrap();
+                                return Err(Err(Ok(e)));
+                            }
+                            Ok(mut buffer) => {
+                                writer
+                                    .write_all_buf(&mut buffer)
+                                    .await
+                                    .map_err(|e| Err(Err(e)))?;
+                            }
+                        }
                     }
+
+                    // After we've consumed all data, shutdown the writer:
+                    log::trace!("Shard download: shutting down writer");
+                    writer.shutdown().await.unwrap();
+                    core::mem::drop(writer);
 
                     Ok::<(), Result<AsyncReedSolomonError, Result<reqwest::Error, std::io::Error>>>(
                         (),
@@ -380,6 +421,7 @@ async fn reconstruct_shard<'a>(
         let reconstruct_future = async {
             use async_io::AsyncWriteExt;
 
+            log::trace!("Running AsyncReedSolomon::reconstruct_shards...");
             async_reed_solomon
                 .reconstruct_shards(
                     &mut input_shards,
@@ -388,6 +430,7 @@ async fn reconstruct_shard<'a>(
                 )
                 .await
                 .map_err(|e| Ok(e))?;
+            log::trace!("AsyncReedSolomon::reconstruct_shards done, shutting down writers!");
 
             // Finally, shutdown the writers:
             for w in output_shards {
@@ -677,17 +720,34 @@ async fn post_shard(
 }
 
 #[get("/stats")]
-async fn get_statistics(state: &State<Arc<NodeServerState>>) -> Json<node_api::NodeStatistics> {
+async fn get_metrics(state: &State<Arc<NodeServerState>>) -> Json<node_api::NodeStatistics> {
     (*state.last_stats_query.lock().unwrap()) = Instant::now();
 
-    Json(node_api::NodeStatistics {
-        bandwidth: 42,
-        cpu_usage: 0,
-        disk_usage: 9001, // over 9000
-        load_avg: 0.5,
-        disk_capacity: 1099511627776,
-        disk_free: 549755813888,
+    let shard_store_path = state.shard_store.path();
+
+    let metrics = tokio::task::spawn_blocking(move || {
+        let cpu_info = procfs::CpuInfo::new().unwrap();
+        let load_avg = procfs::LoadAverage::new().unwrap();
+
+        let mut normalized_load_avg = load_avg.one / cpu_info.cpus.len() as f32;
+        if normalized_load_avg > 1.0 {
+            normalized_load_avg = 1.0;
+        }
+
+        let bytes_used = fs_extra::dir::get_size(&shard_store_path).unwrap();
+        let bytes_free = fs2::available_space(&shard_store_path).unwrap();
+        let capacity = bytes_used + bytes_free;
+
+        node_api::NodeStatistics {
+            load_avg: normalized_load_avg,
+            disk_capacity: capacity,
+            disk_free: bytes_free,
+        }
     })
+    .await
+    .unwrap();
+
+    Json(metrics)
 }
 
 async fn initial_server_state(
@@ -830,11 +890,12 @@ async fn rocket() -> _ {
         .mount(
             "/v0/",
             routes![
+                list_shards,
                 get_shard,
                 post_shard,
                 fetch_shard,
                 reconstruct_shard,
-                get_statistics,
+                get_metrics,
             ],
         )
         .manage(node_server_state)

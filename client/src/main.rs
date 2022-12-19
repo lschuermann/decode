@@ -13,7 +13,7 @@ use tokio::io as async_io;
 use decode_rs::api::coord as coord_api;
 use decode_rs::api::node as node_api;
 use decode_rs::api_client::coord::CoordAPIClient;
-use decode_rs::api_client::node::{NodeAPIClient, NodeAPIDownloadError, NodeAPIUploadError};
+use decode_rs::api_client::node::{NodeAPIClient, NodeAPIUploadError};
 use decode_rs::api_client::reqwest::Url;
 use decode_rs::async_reed_solomon::AsyncReedSolomon;
 
@@ -584,7 +584,12 @@ async fn download_command(_cli: &Cli, cmd: &DownloadCommand) -> Result<(), exitc
 
     let node_api_client = NodeAPIClient::new();
 
+    let mut rng: rand::rngs::SmallRng =
+        rand::SeedableRng::from_rng(&mut rand::thread_rng()).unwrap();
+
     for (chunk_idx, chunk_shards) in retrieval_map.shard_map.iter().enumerate() {
+        use rand::prelude::IteratorRandom;
+
         let chunk_offset = retrieval_map.chunk_size * chunk_idx as u64;
         let chunk_size = std::cmp::min(
             retrieval_map.chunk_size as usize,
@@ -608,60 +613,128 @@ async fn download_command(_cli: &Cli, cmd: &DownloadCommand) -> Result<(), exitc
             .await?;
         }
 
-        async fn download_shards(
-            node_api_client: &NodeAPIClient,
-            chunk_idx: usize,
-            // Per shard index, node URL, SHA3-256 hash of shard, ticket,
-            // expected shard length and a [`DuplexStream`] to read the data
-            // into
-            shards: Vec<(usize, &Url, [u8; 32], &str, async_io::DuplexStream)>,
-        ) -> Result<(), exitcode::ExitCode> {
-            struct DigestWrapper([u8; 32]);
+        // Collect all shard-node combinations into one array which we
+        // can use to try and find shards to download:
+        let parsed_node_map_ref = &parsed_node_map;
+        let mut shard_nodes: Vec<(usize, String, String, reqwest::Url)> = chunk_shards
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, shard_spec)| {
+                shard_spec.nodes.iter().map(move |shard_node_idx| {
+                    (
+                        idx,
+                        shard_spec.digest.clone(),
+                        "dummyticket".to_string(), // TODO!
+                        parsed_node_map_ref[*shard_node_idx].clone(),
+                    )
+                })
+            })
+            .collect();
+
+        // Now, try to initate downloads one-by-one. Potentially we could
+        // optimize by making the first requests be a bulk operation.
+        let shards: usize =
+            retrieval_map.code_ratio_data as usize + retrieval_map.code_ratio_parity as usize;
+        let mut initiated_shard_download_count = 0;
+        let mut initiated_shard_downloads: Vec<_> = (0..shards).map(|_| None).collect();
+        let mut input_shards: Vec<_> = (0..shards).map(|_| None).collect();
+        while shard_nodes.len() > 0
+            && initiated_shard_download_count < retrieval_map.code_ratio_data
+        {
+            log::trace!(
+                "Trying to find a shard+node to fetch. Remaining shard/node \
+		 combinations: {}, required shards: {}, accepted reqs: {}",
+                shard_nodes.len(),
+                retrieval_map.code_ratio_data,
+                initiated_shard_download_count,
+            );
+            // Remove a random entry from the shard_nodes vector and
+            // check whether we've already started a download for this
+            // shard:
+            let i = (0..shard_nodes.len()).choose(&mut rng).unwrap();
+            let (idx, digest_str, ticket, node_url) = shard_nodes.swap_remove(i);
+            if initiated_shard_downloads[idx].is_some() {
+                continue;
+            }
+
+            let mut digest = [0_u8; 32];
+            hex::decode_to_slice(digest_str.as_bytes(), &mut digest[..]).unwrap();
+            #[derive(Debug, Clone)]
+            struct DigestWrapper(pub [u8; 32]);
             impl AsRef<[u8; 32]> for DigestWrapper {
                 fn as_ref(&self) -> &[u8; 32] {
                     &self.0
                 }
             }
+            let digest = DigestWrapper(digest);
 
-            // Spawn the clients, one for every shard to download:
-            let download_requests: Vec<_> = shards
-                .into_iter()
-                .map(|(shard_idx, node_url, digest, ticket, writer)| {
-                    log::info!(
-                        "Downloading shard #{} of chunk #{} from node \"{}\"",
-                        shard_idx,
-                        chunk_idx,
-                        node_url,
-                    );
+            log::debug!("Trying to fetch shard {:?} from node {}", digest, node_url);
 
-                    node_api_client.download_shard(node_url, DigestWrapper(digest), ticket, writer)
-                })
-                .collect();
-
-            // Finally, collectively await the requests:
-            let download_results: Vec<Result<(), NodeAPIDownloadError>> =
-                futures::future::join_all(download_requests.into_iter()).await;
-
-            // Iterate over the write results, reporting the first error we can find:
-            if let Some((shard_idx, Err(e))) = download_results
-                .iter()
-                .enumerate()
-                .find(|(_, res)| res.is_err())
+            // Set off the request, see if it works and returns a stream:
+            let shard_stream = match node_api_client
+                .download_shard_req(node_url.clone(), digest.clone(), ticket)
+                .await
             {
-                log::error!(
-                    "Error while downloading shard {} of chunk {}: {:?}",
-                    shard_idx,
-                    chunk_idx,
-                    e
-                );
-                return Err(MISC_ERR);
-            }
+                Err(err) => {
+                    log::debug!(
+                        "Error while trying to download shard {:?} from \
+			     node {}: {:?}, trying another node/shard.",
+                        digest,
+                        node_url,
+                        err,
+                    );
+                    continue;
+                }
+                Ok(stream) => {
+                    log::trace!(
+                        "Node accepted request and provides shard data stream, \
+			 continuing."
+                    );
+                    stream
+                }
+            };
 
-            Ok(download_results
-                .into_iter()
-                .map(|res| res.unwrap())
-                .collect())
+            // Okay, we got a success response with a stream! Store this along
+            // with an `DuplexStream`, where the other end of it is supplied as
+            // an input_shard to the async reed solomon reconstruct routine:
+            let (reader, writer) = async_io::duplex(64 * 1024);
+            initiated_shard_downloads[idx] = Some((shard_stream, writer));
+            initiated_shard_download_count += 1;
+            input_shards[idx] = Some(reader);
         }
+
+        // If we don't have a sufficient number shards, retry!
+        if initiated_shard_download_count < retrieval_map.code_ratio_data {
+            log::error!(
+                "Could not fetch a sufficient number of shards to reconstruct \
+		 chunk {}",
+                chunk_idx
+            );
+            return Err(MISC_ERR);
+        }
+
+        // Join the download futures into a single one:
+        let download_fut = futures::future::try_join_all(
+            initiated_shard_downloads.into_iter().filter_map(|e| e).map(
+                |(mut stream, mut writer)| async move {
+                    use futures::StreamExt;
+                    use tokio::io::AsyncWriteExt;
+
+                    while let Some(res) = stream.next().await {
+                        let mut buffer = res.map_err(|e| {
+                            log::error!("Error while reading from reqwest bytes stream: {:?}", e);
+                            MISC_ERR
+                        })?;
+                        writer.write_all_buf(&mut buffer).await.map_err(|e| {
+                            log::error!("Error while writing to DuplexStream buffer: {:?}", e);
+                            MISC_ERR
+                        })?;
+                    }
+
+                    Ok(())
+                },
+            ),
+        );
 
         async fn decode_shards(
             async_reed_solomon: &mut AsyncReedSolomon,
@@ -687,109 +760,17 @@ async fn download_command(_cli: &Cli, cmd: &DownloadCommand) -> Result<(), exitc
                 })
         }
 
-        // TODO: this should have a more intricate algorithm of how to select
-        // shards to fetch and the nodes to fetch them from.
-        let mut prev_node_idx = usize::MAX;
-        let (shards_to_fetch, shard_readers) = itertools::process_results(
-            chunk_shards
-                .iter()
-                .enumerate()
-                // Only select shards which have at least one node present. We've
-                // previously already validated that each node entry of a shard must
-                // have a corresponding entry in the node_map.
-                .filter(|(_shard_idx, shard_spec)| shard_spec.nodes.len() > 0)
-                .map(|(shard_idx, shard_spec)| {
-                    // Try to balance our load approximately equally over the nodes
-                    // available for a given chunk's shards by avoiding reselecting
-                    // the previously selected node and cycling through the
-                    // available nodes:
-                    let mut node_found_list_idx: Option<usize> = None;
-                    for (node_list_idx, node) in shard_spec.nodes.iter().enumerate() {
-                        if *node > prev_node_idx {
-                            if let Some(found_node_list_idx) = node_found_list_idx {
-                                if shard_spec.nodes[found_node_list_idx] > *node {
-                                    node_found_list_idx = Some(node_list_idx);
-                                } else {
-                                    // The current node is already closer to the
-                                    // target, so ignore.
-                                }
-                            } else {
-                                node_found_list_idx = Some(node_list_idx);
-                            }
-                        }
-                    }
-
-                    // Fallback: node at index 0
-                    let node_list_idx = node_found_list_idx.unwrap_or(0);
-                    prev_node_idx = shard_spec.nodes[node_list_idx];
-
-                    // Return selected node with its parsed URL:
-                    (shard_idx, &parsed_node_map[prev_node_idx], shard_spec)
-                })
-                // Only take as many shards as we need to reconstruct the full
-                // chunk:
-                .take(retrieval_map.code_ratio_data as usize)
-                // Add a pair of [`DuplexStream`]s for writing into and writing out
-                // of (serve as adapters from [`AsyncWrite`] to [`AsyncRead`]):
-                .map(|(shard_idx, node_url, shard_spec)| {
-                    let (writer, reader) = async_io::duplex(64 * 1024);
-                    (shard_idx, node_url, writer, reader, shard_spec)
-                })
-                .map(|(shard_idx, node_url, writer, reader, shard_spec)| {
-                    // Parse the hex-encoded SHA3-256 digest. This may fail, which
-                    // is why we do it last. This returns a Result which we should
-                    // be able to extract using collect:
-                    let mut digest = [0_u8; 32];
-                    hex::decode_to_slice(&shard_spec.digest, &mut digest)
-                        .map_err(|hex_decode_err| {
-                            log::error!(
-                                "Error while decoding hex-encoded SHA3-256 \
-				 shard digest \"{}\": {:?}",
-                                &shard_spec.digest,
-                                hex_decode_err,
-                            );
-
-                            MISC_ERR
-                        })
-                        .map(|()| {
-                            (
-                                (shard_idx, node_url, digest, "", writer),
-                                (shard_idx, reader),
-                            )
-                        })
-                }),
-            |iter| iter.unzip::<_, _, Vec<_>, Vec<_>>(),
-        )?;
-
-        let mut opt_shard_readers = Vec::with_capacity(
-            retrieval_map.code_ratio_data as usize + retrieval_map.code_ratio_parity as usize,
-        );
-        for (shard_idx, reader) in shard_readers.into_iter() {
-            while opt_shard_readers.len() < shard_idx {
-                opt_shard_readers.push(None);
-            }
-            opt_shard_readers.push(Some(reader));
-        }
-        while opt_shard_readers.len()
-            < retrieval_map.code_ratio_data as usize + retrieval_map.code_ratio_parity as usize
-        {
-            opt_shard_readers.push(None);
-        }
-
-        // Download the shards, streaming them into the passed [`DuplexStream`]s:
-        let download_fut = download_shards(&node_api_client, chunk_idx, shards_to_fetch);
-
         // ...while simultaneously decoding them.
         let decode_fut = decode_shards(
             &mut async_reed_solomon,
-            opt_shard_readers,
+            input_shards,
             &mut object_file,
             chunk_idx,
             chunk_size,
         );
 
         // Now, execute both:
-        let ((), ()) = futures::try_join!(download_fut, decode_fut)?;
+        let (_, ()) = futures::try_join!(download_fut, decode_fut)?;
     }
 
     // object_file.borrow_mut().shutdown().await.map_err(|e| AsyncReedSolomonError::IOError(e.kind()))?;
