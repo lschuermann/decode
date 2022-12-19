@@ -44,3 +44,22 @@ efficient fault tolerance in light of node failures
 
 - Leon Schuermann <lschuermann@princeton.edu>
 - Fengchen Gong <gongf@princeton.edu>
+
+## License
+
+The DECODE Software is licensed under terms and conditions of the AGPL-v3.0
+license. A full copy of the license text can be found in the repository root
+under [`LICENSE`](./LICENSE).
+
+Copyright (C) The DECODE Contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the version 3 of the GNU Affero General Public License as published
+by the Free Software Foundation.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program.  If not, see <https://www.gnu.org/licenses/>.
