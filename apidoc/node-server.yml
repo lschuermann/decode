@@ -1,0 +1,227 @@
+openapi: 3.0.3
+
+info:
+  title: DECODE Node Server API
+  version: 0.1.0
+
+paths:
+  /shard/:
+    get:
+      summary: Enumerate shards stored on this node
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of shards
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ShardInfo"
+
+    post:
+      summary: Upload a shard
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Shard uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShardUploadReceipt"
+
+  /shard/{shardDigest}:
+    get:
+      summary: Retrieve a shard
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: shardDigest
+          in: path
+          required: true
+          description: Hex-encoded SHA3-256 digest of shard
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Download shard data
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /shard/{shardDigest}/fetch:
+    post:
+      summary: Fetch a shard from another node
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: shardDigest
+          in: path
+          required: true
+          description: Hex-encoded SHA3-256 digest of shard
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - source_node
+              - ticket
+              properties:
+                source_node:
+                  type: string
+                  description: Base-URL of node to fetch shard from
+                ticket:
+                  type: string
+                  description: |
+                    Ticket authorizing this node to act as a client
+                    towards the source node and fetch the requested
+                    shard.
+      responses:
+        '200':
+          description: Shard replicated on this node successfully
+          
+  /shard/{shardDigest}/reconstruct:
+    post:
+      summary: Reconstruct a chunk to obtain a missing shard
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: shardDigest
+          in: path
+          required: true
+          description: Hex-encoded SHA3-256 digest of shard
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObjectReconstructMap"
+      responses:
+        '200':
+          description: Shard reconstructed on this node successfully
+      
+
+components:
+  schemas:
+    ShardInfo:
+      type: object
+      required:
+        - digest
+        - size
+      properties:
+        digest:
+          type: string
+          description: Hex-encoded SHA3-256 digest of shard data
+        size:
+          type: integer
+          format: int64
+          description: "Size of the shard in bytes"
+    ShardUploadReceipt:
+      type: object
+      required:
+        - digest
+        - receipt
+      properties:
+        digest:
+          type: string
+          description: Hex-encoded SHA3-256 digest of shard data
+        receipt:
+          type: string
+          description: |
+            Opaque (digitally signed) receipt to confirm that this shard has
+            been uploaded to the node.
+    ObjectReconstructMap:
+      type: object
+      required:
+        - chunk_size
+        - shard_size
+        - code_ratio_data
+        - code_ratio_parity
+        - shard_map
+        - node_map
+      properties:
+        chunk_size:
+          type: integer
+          format: int64
+          description: |
+            Size of each chunk in bytes (in this example, ~498MB)
+            The number of chunks in an object can be calculated as
+                chunk_count = ceil(object_size / chunk_size)
+            . Chunks are evenly distributed over the entire object, and the
+            start address of a chunk `i` can be calculated as
+                chunk_start = i * chunk_size
+            . In case `object_size` is not evenly divisible by `chunk_size`,
+            the last chunk may be smaller than `chunk_size`, its size can
+            be calculated as `object_size mod chunk_size`.
+          example: 522346426
+        shard_size:
+          type: integer
+          format: int64
+          description: |
+            Size of each shard in bytes (in this example, ~49MB)
+            The number of shards in a chunk can be calculated as
+                shard_count = ceil(chunk_size / shard_size)
+            . Shards are evenly distributed over a chunk, and the
+            start address of a shard `i` can be calculated as
+                shard_start = i * shard_size
+            . In case `chunk_size` is not evenly divisible by `shard_size`,
+            the last shard may be smaller than `shard_size`, its size can
+            be calculated as `chunk_size mod shard_size`. For purposes of
+            parity shard calculation and reconstruction, the last chunk is to
+            be padded to the full `shard_size` with null-bytes.
+          example: 52234642
+        code_ratio_data:
+          type: integer
+          description: Number of data shards per chunk
+          example: 10
+        code_ratio_parity:
+          type: integer
+          description: Number of parity shards per chunk
+          example: 4
+        shard_map:
+          type: array
+          items:
+            type: array
+            items:
+              type: object
+              required:
+                - digest
+                - nodes
+                - ticket
+              properties:
+                digest:
+                  type: string
+                  description: Sha3-256 digest of shard
+                nodes:
+                  type: array
+                  items:
+                    type: integer
+                    description: NodeMap index
+                ticket:
+                  type: string
+                  description: Authorization ticket for node storing shards
+        node_map:
+          type: array
+          items:
+            type: string
+            description: Base URL of node
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      

@@ -1,0 +1,5 @@
+# Basic Server Configuration
+public_url = "http://localhost:8000"
+coordinator_url = "http://localhost:8001"
+node_id = "533304cc-cd09-4bff-81e4-d4b9eef255d0"
+shards_path = "./shards"

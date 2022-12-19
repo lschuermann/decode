@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "decode-rs",
+    "node-server",
+    "client",
+]

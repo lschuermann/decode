@@ -1,0 +1,296 @@
+openapi: 3.0.3
+
+info:
+  title: DECODE Coordinator Server API
+  version: 0.1.0
+
+paths:
+
+  /v0/object/{objectId}:
+    get:
+      summary: Retrieve an object
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: objectId
+          in: path
+          required: true
+          description: UUID of object
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Object retrieval map
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectRetrievalMap"
+
+  /v0/object:
+    post:
+      summary: Upload an object
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - object_size
+              properties:
+                object_size:
+                  type: integer
+                  format: int64
+                  description: Size of the object in bytes
+      responses:
+        '200':
+          description: Object insertion map
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectUploadMap"
+  /v0/object/{objectId}/finalize:
+    put:
+      summary: Finalize upload of object
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: objectId
+          in: path
+          required: true
+          description: UUID of object
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - upload_results
+                - object_upload_map
+              properties:
+                upload_results:
+                  type: array
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - digest
+                        - receipt
+                        - node_id
+                      properties:
+                        digest:
+                          type: string
+                          description: Sha3-256 digest of shard
+                        receipt:
+                          type: string
+                          description: Receipt from uploading to node
+                        node_id:
+                          type: string
+                          description: UUID of node
+                object_upload_map:
+                  $ref: "#/components/schemas/ObjectUploadMap"
+      responses:
+        '200':
+          description: Object uploaded
+  
+  /v0/node/{nodeId}:
+    put:
+      summary: Register a new node
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: UUID of node
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - node_url
+                - shards
+              properties:
+                node_url:
+                  type: string
+                  description: URL of node
+                shards:
+                  type: array
+                  items:
+                    type: string
+                    description: Sha3-256 digest of shard
+                  
+                    
+      responses:
+        '200':
+          description: Node register successfully
+                  
+components:
+  schemas:
+    ObjectRetrievalMap:
+      type: object
+      required:
+        - object_size
+        - chunk_size
+        - shard_size
+        - code_ratio_data
+        - code_ratio_parity
+        - shard_map
+        - node_map
+      properties:
+        object_size:
+          type: integer
+          format: int64
+          description: Size of the object in bytes (in this example, ~38.13GB)
+          example: 38131289164
+        chunk_size:
+          type: integer
+          format: int64
+          description: |
+            Size of each chunk in bytes (in this example, ~498MB)
+            The number of chunks in an object can be calculated as
+                chunk_count = ceil(object_size / chunk_size)
+            . Chunks are evenly distributed over the entire object, and the
+            start address of a chunk `i` can be calculated as
+                chunk_start = i * chunk_size
+            . In case `object_size` is not evenly divisible by `chunk_size`,
+            the last chunk may be smaller than `chunk_size`, its size can
+            be calculated as `object_size mod chunk_size`.
+          example: 522346426
+        shard_size:
+          type: integer
+          format: int64
+          description: |
+            Size of each shard in bytes (in this example, ~49MB)
+            The number of shards in a chunk can be calculated as
+                shard_count = ceil(chunk_size / shard_size)
+            . Shards are evenly distributed over a chunk, and the
+            start address of a shard `i` can be calculated as
+                shard_start = i * shard_size
+            . In case `chunk_size` is not evenly divisible by `shard_size`,
+            the last shard may be smaller than `shard_size`, its size can
+            be calculated as `chunk_size mod shard_size`. For purposes of
+            parity shard calculation and reconstruction, the last chunk is to
+            be padded to the full `shard_size` with null-bytes.
+          example: 52234642
+        code_ratio_data:
+          type: integer
+          description: Number of data shards per chunk
+          example: 10
+        code_ratio_parity:
+          type: integer
+          description: Number of parity shards per chunk
+          example: 4
+        shard_map:
+          type: array
+          items:
+            type: array
+            items:
+              type: object
+              required:
+                - digest
+                - nodes
+              properties:
+                digest:
+                  type: string
+                  description: Sha3-256 digest of shard
+                nodes:
+                  type: array
+                  items:
+                    type: integer
+                    description: NodeMap index
+        node_map:
+          type: array
+          items:
+            type: string
+            description: Base URL of node
+    ObjectUploadMap:
+      type: object
+      required:
+        - object_size
+        - chunk_size
+        - shard_size
+        - code_ratio_data
+        - code_ratio_parity
+        - shard_map
+        - object_id
+        - signature
+      properties:
+        object_size:
+          type: integer
+          format: int64
+          description: Size of the object in bytes (in this example, ~38.13GB)
+          example: 38131289164
+        chunk_size:
+          type: integer
+          format: int64
+          description: |
+            Size of each chunk in bytes (in this example, ~498MB)
+            The number of chunks in an object can be calculated as
+                chunk_count = ceil(object_size / chunk_size)
+            . Chunks are evenly distributed over the entire object, and the
+            start address of a chunk `i` can be calculated as
+                chunk_start = i * chunk_size
+            . In case `object_size` is not evenly divisible by `chunk_size`,
+            the last chunk may be smaller than `chunk_size`, its size can
+            be calculated as `object_size mod chunk_size`.
+          example: 522346426
+        shard_size:
+          type: integer
+          format: int64
+          description: |
+            Size of each shard in bytes (in this example, ~49MB)
+            The number of shards in a chunk can be calculated as
+                shard_count = ceil(chunk_size / shard_size)
+            . Shards are evenly distributed over a chunk, and the
+            start address of a shard `i` can be calculated as
+                shard_start = i * shard_size
+            . In case `chunk_size` is not evenly divisible by `shard_size`,
+            the last shard may be smaller than `shard_size`, its size can
+            be calculated as `chunk_size mod shard_size`. For purposes of
+            parity shard calculation and reconstruction, the last chunk is to
+            be padded to the full `shard_size` with null-bytes.
+          example: 52234642
+        code_ratio_data:
+          type: integer
+          description: Number of data shards per chunk
+          example: 10
+        code_ratio_parity:
+          type: integer
+          description: Number of parity shards per chunk
+          example: 4
+        shard_map:
+          type: array
+          items:
+            type: array
+            items:
+              type: object
+              required:
+                - ticket
+                - node
+              properties:
+                ticket:
+                  type: string
+                  description: Authorization ticket for node storing shards
+                node:
+                  type: string
+                  description: Base URL of node
+        object_id:
+          type: string
+          description: UUID of object
+        signature:
+          type: string
+          description: Opaque Signature of request
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
