@@ -193,8 +193,6 @@ impl AsyncReedSolomon {
         writers: &mut [BW],
         len: usize,
     ) -> Result<(), AsyncReedSolomonError> {
-        log::trace!("Encoding chunk with len {}", len);
-
         let data_shard_start_idx = 0;
         let data_shard_end_idx = data_shard_start_idx + self.rs.data_shard_count();
         let data_shard_idx = data_shard_start_idx..data_shard_end_idx;
@@ -383,10 +381,11 @@ impl AsyncReedSolomon {
                                 .read(&mut buffer[progress..read_row_bytes_limit])
                                 .await?;
                             progress += read_bytes;
-                            if progress == 0 {
+                            if read_bytes == 0 {
                                 break;
                             }
                         }
+
                         Ok(progress)
                     }),
             )
@@ -446,6 +445,8 @@ impl AsyncReedSolomon {
                 // should be enforced above:
                 .unwrap();
 
+            log::error!("Reed solomon row bytes: {}", read_row_bytes);
+
             // Subslice the buffers, returning a data structure whose format is
             // compatible with what [`ReedSolomon::reconstruct_data`]
             // expects. This is required as we need to limit the length of each
@@ -457,7 +458,7 @@ impl AsyncReedSolomon {
                 .enumerate()
                 .map(|(i, (b, r))| {
                     if r.is_some() {
-                        (&mut b[..read_row_bytes_limit], true)
+                        (&mut b[..read_row_bytes], true)
                     } else if only_reconstruct_data && i >= self.rs.data_shard_count() {
                         // Don't actually slice any memory, this shard must not
                         // be relevant to the Reed Solomon reconstruction
@@ -465,7 +466,7 @@ impl AsyncReedSolomon {
                         // data shards to be reconstructed.
                         (&mut b[..0], false)
                     } else {
-                        (&mut b[..read_row_bytes_limit], false)
+                        (&mut b[..read_row_bytes], false)
                     }
                 })
                 .collect();
@@ -473,13 +474,17 @@ impl AsyncReedSolomon {
             // Run the routine for reconstructing shards, depending on which
             // shards we'd like to reconstruct:
             if only_reconstruct_data {
+                log::trace!("Running ReedSolomon::reconstruct_data...");
                 self.rs
                     .reconstruct_data(&mut limited_buffers)
                     .map_err(AsyncReedSolomonError::ReedSolomonError)?;
+                log::trace!("ReedSolomon::reconstruct_data done.");
             } else {
+                log::trace!("Running ReedSolomon::reconstruct...");
                 self.rs
                     .reconstruct(&mut limited_buffers)
                     .map_err(AsyncReedSolomonError::ReedSolomonError)?;
+                log::trace!("ReedSolomon::reconstruct done.");
             }
 
             // Now, write the reconstructed rows into the writers:
@@ -611,10 +616,10 @@ impl AsyncReedSolomon {
 
             // Make sure that the reconstruction algorithm has marked all data
             // shards as valid and their length hasn't been changed.
-            assert!(limited_buffers[..self.rs.data_shard_count()]
-                .iter()
-                .find(|(buffer, valid)| !valid || buffer.len() != read_columns)
-                .is_none());
+            //assert!(limited_buffers[..self.rs.data_shard_count()]
+            //    .iter()
+            //    .find(|(buffer, valid)| !valid || buffer.len() != read_columns)
+            //    .is_none());
 
             // Okay, now dump the buffer contents into the writer:
             let write_len = std::cmp::min(
